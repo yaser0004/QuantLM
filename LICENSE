@@ -1,21 +1,95 @@
-MIT License
+Custom Source-Available License (QuantLM) v1.0
 
-Copyright (c) 2025 QuantLM Contributors
+Copyright (c) 2025-2026 QuantLM Contributors
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This license governs your use, reproduction, modification, and distribution of
+the QuantLM source code and associated files (the "Software").
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Definitions
+
+"Non-Commercial Use" means personal, educational, research, hobby, and internal
+evaluation use where no fee is charged for access to the Software itself and no
+direct revenue is generated from the Software or a derivative work.
+
+"Commercial Use" means any use not covered by Non-Commercial Use, including but
+not limited to selling, licensing, hosting, offering as a paid service, bundling
+in paid products, or using the Software to provide revenue-generating services.
+
+"Model Artifacts" means model weights, checkpoints, tokenizers, adapters,
+datasets, prompts, or other AI assets that are distributed by third parties and
+used with or alongside the Software.
+
+"Platform-Required Rights" means the limited rights required by a repository
+hosting platform (for example GitHub) to host, copy, index, display, and enable
+standard collaboration workflows such as forks, pull requests, and code review.
+
+2. License Grant (Source-Available)
+
+Subject to compliance with this license, you are granted a non-exclusive,
+worldwide, revocable license to:
+
+- Use the Software for Non-Commercial Use.
+- Copy and modify the Software for Non-Commercial Use.
+- Share source-code modifications for Non-Commercial Use, provided this license
+  and all copyright notices are preserved.
+
+3. Commercial Use Restriction
+
+Commercial Use is not permitted under this license.
+
+You must obtain a separate written commercial license from the copyright holders
+before any Commercial Use.
+
+4. Additional Restrictions
+
+You may not:
+
+- Remove, alter, or obscure copyright, attribution, or license notices.
+- Misrepresent modified versions as the original project.
+- Use project names, logos, or trademarks to imply endorsement without permission.
+
+5. Third-Party Components and Model Licenses
+
+The Software may include or depend on third-party components that are licensed
+under their own terms. Those components remain governed by their respective
+licenses. This license applies only to the portions owned by QuantLM
+contributors.
+
+For clarity, Model Artifacts are not licensed under this license unless
+explicitly stated in writing by their respective rightsholders. If you use model
+families such as Llama, Gemma, Qwen, or other third-party assets with the
+Software, you are responsible for complying with each applicable model and asset
+license.
+
+6. No Warranty
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT.
+
+7. Limitation of Liability
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM,
+DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR
+OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE
+OR OTHER DEALINGS IN THE SOFTWARE.
+
+8. Termination
+
+Any violation of this license automatically terminates your rights under it.
+Upon termination, you must cease use and distribution of the Software until a
+new written grant is provided.
+
+9. Contact for Commercial Licensing
+
+For commercial licensing inquiries, open an issue in this repository or contact
+the project maintainers through the repository profile.
+
+10. Repository Hosting Platforms and Forks
+
+If the Software is hosted on a platform that requires Platform-Required Rights,
+you grant only those minimum rights necessary for platform operation.
+
+Any fork, mirror, or copy created through platform features remains subject to
+this license. Platform-Required Rights do not grant permission for Commercial
+Use or any broader use beyond what this license allows.
