@@ -1,0 +1,107 @@
+# Android SDK cache
+.android/
+
+# Android Studio / IDE
+*.iml
+*.ipr
+*.iws
+.idea/
+.vscode/
+captures/
+.navigation/
+vcs.xml
+
+# Gradle / Kotlin caches
+.gradle/
+.configuration-cache/
+.kotlin/
+gradle-app.setting
+
+# Build outputs
+**/build/
+bin/
+gen/
+out/
+release/
+obj/
+*.dex
+*.class
+*.apk
+*.ap_
+*.aab
+
+# CMake and NDK
+.externalNativeBuild/
+.cxx/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+
+# Native libraries (generated)
+*.so
+*.a
+
+# Profiling
+*.hprof
+
+# Local configuration (environment-specific)
+local.properties
+keystore.properties
+
+# Keystores and signing files
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.der
+*.csr
+*.crt
+
+# Environment and secret configuration
+.env
+.env.*
+!.env.example
+**/google-services.json
+**/secrets.properties
+**/signing.properties
+**/credentials.properties
+**/*service-account*.json
+**/*firebase-adminsdk*.json
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*.bak
+*.orig
+*.rej
+*.ps1.log
+hs_err_pid*.log
+replay_pid*.log
+
+# OS-specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*~
+
+# Large assets (models too big for git)
+*.gguf
+*.bin
+*.safetensors
+app/src/main/assets/models/
+
+# Local tools folders
+platform-tools/
+
+# Local build diagnostics
+build_error.txt
+build_error_utf8.txt

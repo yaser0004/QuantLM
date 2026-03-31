@@ -1,0 +1,67 @@
+<resources>
+    <string name="app_name">QuantLM</string>
+    
+    <!-- Navigation -->
+    <string name="nav_chat">Chat</string>
+    <string name="nav_models">Models</string>
+    <string name="nav_settings">Settings</string>
+    
+    <!-- Chat Screen -->
+    <string name="chat_input_hint">Type a message…</string>
+    <string name="chat_send">Send</string>
+    <string name="chat_stop">Stop</string>
+    <string name="chat_new">New Chat</string>
+    <string name="chat_empty_state">Start a conversation with your local AI model</string>
+    <string name="chat_model_not_loaded">No model loaded. Please select a model in Settings.</string>
+    
+    <!-- Models Screen -->
+    <string name="models_title">Available Models</string>
+    <string name="models_download">Download Model</string>
+    <string name="models_delete">Delete</string>
+    <string name="models_load">Load</string>
+    <string name="models_loaded">Loaded</string>
+    <string name="models_size">Size: %s</string>
+    <string name="models_empty">No models available. Download a model to get started.</string>
+    <string name="models_download_url_hint">Enter model URL (.gguf file)</string>
+    <string name="models_downloading">Downloading: %d%%</string>
+    
+    <!-- Settings Screen -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_model">Model Settings</string>
+    <string name="settings_current_model">Current Model</string>
+    <string name="settings_no_model">No model selected</string>
+    <string name="settings_temperature">Temperature</string>
+    <string name="settings_temperature_desc">Controls randomness (0.0 - 2.0)</string>
+    <string name="settings_max_tokens">Max Tokens</string>
+    <string name="settings_max_tokens_desc">Maximum response length</string>
+    <string name="settings_context_length">Context Length</string>
+    <string name="settings_context_length_desc">Model context window</string>
+    <string name="settings_threads">CPU Threads</string>
+    <string name="settings_threads_desc">Number of CPU threads for inference</string>
+    <string name="settings_gpu_layers">GPU Layers</string>
+    <string name="settings_gpu_layers_desc">Number of layers to offload to GPU (0 = CPU only)</string>
+    <string name="settings_system_prompt">System Prompt</string>
+    <string name="settings_system_prompt_hint">Enter system instructions for the model</string>
+    <string name="settings_about">About</string>
+    <string name="settings_version">Version</string>
+    <string name="settings_clear_history">Clear Chat History</string>
+    <string name="settings_clear_history_confirm">Are you sure you want to clear all chat history?</string>
+    
+    <!-- Dialogs -->
+    <string name="dialog_ok">OK</string>
+    <string name="dialog_cancel">Cancel</string>
+    <string name="dialog_delete">Delete</string>
+    <string name="dialog_confirm">Confirm</string>
+    
+    <!-- Errors -->
+    <string name="error_model_load_failed">Failed to load model</string>
+    <string name="error_inference_failed">Inference failed</string>
+    <string name="error_download_failed">Download failed</string>
+    <string name="error_no_storage_permission">Storage permission required</string>
+    <string name="error_invalid_url">Invalid URL</string>
+    
+    <!-- Success Messages -->
+    <string name="success_model_loaded">Model loaded successfully</string>
+    <string name="success_model_downloaded">Model downloaded successfully</string>
+    <string name="success_history_cleared">Chat history cleared</string>
+</resources>
