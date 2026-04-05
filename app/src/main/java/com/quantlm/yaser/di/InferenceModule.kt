@@ -18,15 +18,15 @@ import javax.inject.Singleton
  * Qualifier annotations for different inference engines
  */
 @Qualifier
-@Retention(AnnotationRetention.BINARY)
+@Retention(AnnotationRetention.RUNTIME)
 annotation class LlamaEngineQualifier
 
 @Qualifier
-@Retention(AnnotationRetention.BINARY)
+@Retention(AnnotationRetention.RUNTIME)
 annotation class LiteRTEngineQualifier
 
 @Qualifier
-@Retention(AnnotationRetention.BINARY)
+@Retention(AnnotationRetention.RUNTIME)
 annotation class TFLiteEngineQualifier
 
 @Module
@@ -47,6 +47,7 @@ object InferenceModule {
      * Provides the LlamaEngine with qualifier for explicit injection
      */
     @Provides
+    @Singleton
     @LlamaEngineQualifier
     fun provideLlamaEngine(llamaEngine: LlamaEngine): LlamaEngine {
         return llamaEngine
@@ -65,6 +66,7 @@ object InferenceModule {
      * Provides the TFLiteEngine with qualifier for explicit injection
      */
     @Provides
+    @Singleton
     @TFLiteEngineQualifier
     fun provideTFLiteEngine(tfLiteEngine: TFLiteEngine): TFLiteEngine {
         return tfLiteEngine
@@ -90,6 +92,7 @@ object InferenceModule {
      * Provides the LiteRTEngine with qualifier for explicit injection
      */
     @Provides
+    @Singleton
     @LiteRTEngineQualifier
     fun provideLiteRTEngine(liteRTEngine: LiteRTEngine): LiteRTEngine {
         return liteRTEngine

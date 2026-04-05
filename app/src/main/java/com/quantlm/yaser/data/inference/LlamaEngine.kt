@@ -1,6 +1,7 @@
 package com.quantlm.yaser.data.inference
 
 import android.util.Log
+import androidx.annotation.Keep
 import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import com.quantlm.yaser.domain.inference.InferenceError
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +37,9 @@ class LlamaEngine @Inject constructor() {
     
     @Volatile
     private var loadedModelName: String? = null
+
+    @Volatile
+    private var lastLoadedGpuLayers: Int = 0
     
     // Native method declarations
     private external fun nativeInit(): Boolean
@@ -88,6 +92,8 @@ class LlamaEngine @Inject constructor() {
     private external fun nativeStopGeneration()
     
     private external fun nativeGetModelInfo(): String
+
+    private external fun nativeIsVulkanCompiled(): Boolean
     
     private external fun nativeCleanup()
     
@@ -182,6 +188,7 @@ class LlamaEngine @Inject constructor() {
             
             if (success) {
                 isModelLoaded = true
+                lastLoadedGpuLayers = nGpuLayers
                 // Extract model name from file path (without extension)
                 loadedModelName = file.nameWithoutExtension
                 Log.i(TAG, "Model loaded successfully: $modelPath")
@@ -222,6 +229,7 @@ class LlamaEngine @Inject constructor() {
         if (isModelLoaded) {
             nativeUnloadModel()
             isModelLoaded = false
+            lastLoadedGpuLayers = 0
             loadedModelName = null
             Log.i(TAG, "Model unloaded")
             AppEventLogger.info(component = TAG, action = "model_unloaded")
@@ -395,6 +403,22 @@ class LlamaEngine @Inject constructor() {
             "No model loaded"
         }
     }
+
+    fun getActiveBackendLabel(): String {
+        if (!isModelLoaded && !isVisionModelLoaded) {
+            return "Unknown"
+        }
+
+        return if (lastLoadedGpuLayers > 0) {
+            if (nativeIsVulkanCompiled()) {
+                "GPU (Vulkan)"
+            } else {
+                "CPU (GPU requested, Vulkan unavailable)"
+            }
+        } else {
+            "CPU"
+        }
+    }
     
     fun isLoaded(): Boolean = isModelLoaded
     
@@ -450,6 +474,7 @@ class LlamaEngine @Inject constructor() {
             if (success) {
                 isVisionModelLoaded = true
                 isModelLoaded = true
+                lastLoadedGpuLayers = nGpuLayers
                 // Extract model name from file path (without extension)
                 loadedModelName = modelFile.nameWithoutExtension
                 Log.i(TAG, "Vision model loaded successfully: $modelPath")
@@ -490,6 +515,7 @@ class LlamaEngine @Inject constructor() {
         if (isVisionModelLoaded) {
             nativeUnloadVisionModel()
             isVisionModelLoaded = false
+            lastLoadedGpuLayers = 0
             loadedModelName = null
             Log.i(TAG, "Vision model unloaded")
             AppEventLogger.info(component = TAG, action = "vision_model_unloaded")
@@ -633,9 +659,15 @@ class LlamaEngine @Inject constructor() {
         }
     }
     
+    @Keep
     interface StreamCallback {
+        @Keep
         fun onToken(token: String)
+
+        @Keep
         fun onComplete()
+
+        @Keep
         fun onError(message: String) {} // Default empty implementation for backward compatibility
     }
 }

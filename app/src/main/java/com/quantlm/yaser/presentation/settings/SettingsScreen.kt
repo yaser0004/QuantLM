@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import android.provider.Settings
 import androidx.core.net.toUri
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.quantlm.yaser.data.local.GenerationPreferences
 import com.quantlm.yaser.domain.model.ModelLoadingState
 import com.quantlm.yaser.presentation.ui.common.ModernGradientHeader
 
@@ -52,9 +53,11 @@ fun SettingsScreen(
     val mirostat by viewModel.mirostat.collectAsState()
     val mirostatTau by viewModel.mirostatTau.collectAsState()
     val mirostatEta by viewModel.mirostatEta.collectAsState()
+    val isAdvancedInferenceEnabled by viewModel.isAdvancedInferenceEnabled.collectAsState()
     val contextLength by viewModel.contextLength.collectAsState()
     val cpuThreads by viewModel.cpuThreads.collectAsState()
     val gpuLayers by viewModel.gpuLayers.collectAsState()
+    val hardwareAccelerationMode by viewModel.hardwareAccelerationMode.collectAsState()
     val systemPrompt by viewModel.systemPrompt.collectAsState()
     val message by viewModel.message.collectAsState()
 
@@ -237,23 +240,32 @@ fun SettingsScreen(
                         text = "Core Generation Parameters",
                         style = MaterialTheme.typography.titleMedium
                     )
-                    
-                    SettingSlider(
-                        label = "Temperature",
-                        value = temperature,
-                        onValueChange = viewModel::setTemperature,
-                        valueRange = 0f..2f,
-                        steps = 19,
-                        valueFormatter = { String.format("%.2f", it) },
-                        info = "Controls randomness in text generation.\n\n" +
-                                "• 0.0-0.3: Very focused and deterministic (good for factual tasks)\n" +
-                                "• 0.4-0.7: Balanced creativity and coherence (recommended)\n" +
-                                "• 0.8-1.2: More creative and diverse responses\n" +
-                                "• 1.3-2.0: Very creative but may lose coherence",
-                        onReset = viewModel::resetTemperature
-                    )
-                    
-                    Divider()
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = "Advanced Inference Controls",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "Warning: Overriding these values may cause the AI to output gibberish or loop infinitely.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = isAdvancedInferenceEnabled,
+                            onCheckedChange = viewModel::setAdvancedInferenceEnabled
+                        )
+                    }
                     
                     SettingSlider(
                         label = "Max Tokens",
@@ -273,23 +285,6 @@ fun SettingsScreen(
                     Divider()
                     
                     SettingSlider(
-                        label = "Top P (Nucleus Sampling)",
-                        value = topP,
-                        onValueChange = viewModel::setTopP,
-                        valueRange = 0f..1f,
-                        steps = 19,
-                        valueFormatter = { String.format("%.2f", it) },
-                        info = "Cumulative probability cutoff for token selection.\n\n" +
-                                "• 0.1-0.5: Very focused, conservative responses\n" +
-                                "• 0.6-0.9: Balanced variety (0.9 recommended)\n" +
-                                "• 0.9-1.0: Maximum diversity\n\n" +
-                                "Lower values make output more deterministic by considering fewer tokens.",
-                        onReset = viewModel::resetTopP
-                    )
-                    
-                    Divider()
-                    
-                    SettingSlider(
                         label = "Top K",
                         value = topK.toFloat(),
                         onValueChange = { viewModel.setTopK(it.toInt()) },
@@ -303,6 +298,78 @@ fun SettingsScreen(
                                 "Works together with Top P to control output variety.",
                         onReset = viewModel::resetTopK
                     )
+
+                    AnimatedVisibility(
+                        visible = isAdvancedInferenceEnabled,
+                        enter = expandVertically() + fadeIn(),
+                        exit = shrinkVertically() + fadeOut()
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                            Divider()
+
+                            SettingSlider(
+                                label = "Temperature",
+                                value = temperature,
+                                onValueChange = viewModel::setTemperature,
+                                valueRange = 0f..1.5f,
+                                steps = 14,
+                                valueFormatter = { String.format("%.2f", it) },
+                                info = "Controls randomness in text generation.\n\n" +
+                                        "Safe range is clamped to reduce model instability and looping.",
+                                onReset = viewModel::resetTemperature
+                            )
+
+                            Divider()
+
+                            SettingSlider(
+                                label = "Top P (Nucleus Sampling)",
+                                value = topP,
+                                onValueChange = viewModel::setTopP,
+                                valueRange = 0.1f..1f,
+                                steps = 17,
+                                valueFormatter = { String.format("%.2f", it) },
+                                info = "Cumulative probability cutoff for token selection.\n\n" +
+                                        "Lower values constrain outputs; extreme values can destabilize quality.",
+                                onReset = viewModel::resetTopP
+                            )
+
+                            Divider()
+
+                            SettingSlider(
+                                label = "Min P",
+                                value = minP,
+                                onValueChange = viewModel::setMinP,
+                                valueRange = 0.0f..0.2f,
+                                steps = 19,
+                                valueFormatter = { String.format("%.3f", it) },
+                                info = "Minimum probability threshold for token selection.\n\n" +
+                                        "Range is limited to avoid catastrophic filtering behavior.",
+                                onReset = viewModel::resetMinP
+                            )
+
+                            Divider()
+
+                            SettingSlider(
+                                label = "Repetition Penalty",
+                                value = repeatPenalty,
+                                onValueChange = viewModel::setRepeatPenalty,
+                                valueRange = 1.0f..1.3f,
+                                steps = 14,
+                                valueFormatter = { String.format("%.2f", it) },
+                                info = "Penalizes repeated tokens.\n\n" +
+                                        "Strong penalties can degrade coherence, so this control is safety-clamped.",
+                                onReset = viewModel::resetRepeatPenalty
+                            )
+
+                            OutlinedButton(
+                                onClick = viewModel::resetToModelDefaults,
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = loadedModel != null
+                            ) {
+                                Text("Reset to Model Defaults")
+                            }
+                        }
+                    }
                 }
             }
             
@@ -320,23 +387,6 @@ fun SettingsScreen(
                     )
                     
                     SettingSlider(
-                        label = "Repetition Penalty",
-                        value = repeatPenalty,
-                        onValueChange = viewModel::setRepeatPenalty,
-                        valueRange = 1.0f..2.0f,
-                        steps = 19,
-                        valueFormatter = { String.format("%.2f", it) },
-                        info = "Penalizes repeated tokens to reduce repetition.\n\n" +
-                                "• 1.0: No penalty (may repeat)\n" +
-                                "• 1.1-1.3: Light penalty (recommended)\n" +
-                                "• 1.4-2.0: Strong penalty (may become incoherent)\n\n" +
-                                "Use with Repeat Last N to control penalty window.",
-                        onReset = viewModel::resetRepeatPenalty
-                    )
-                    
-                    Divider()
-                    
-                    SettingSlider(
                         label = "Repeat Last N Tokens",
                         value = repeatLastN.toFloat(),
                         onValueChange = { viewModel.setRepeatLastN(it.toInt()) },
@@ -349,23 +399,6 @@ fun SettingsScreen(
                                 "• 128-256: Long-term pattern prevention\n\n" +
                                 "Larger values prevent repeating phrases from earlier in the response.",
                         onReset = viewModel::resetRepeatLastN
-                    )
-                    
-                    Divider()
-                    
-                    SettingSlider(
-                        label = "Min P",
-                        value = minP,
-                        onValueChange = viewModel::setMinP,
-                        valueRange = 0.0f..1.0f,
-                        steps = 19,
-                        valueFormatter = { String.format("%.3f", it) },
-                        info = "Minimum probability threshold for token selection.\n\n" +
-                                "• 0.0: Disabled (default)\n" +
-                                "• 0.01-0.05: Light filtering (recommended)\n" +
-                                "• 0.1+: Strong filtering (very focused)\n\n" +
-                                "Removes tokens below this probability ratio compared to the most likely token.",
-                        onReset = viewModel::resetMinP
                     )
                     
                     Divider()
@@ -500,6 +533,44 @@ fun SettingsScreen(
                         text = "Hardware Settings",
                         style = MaterialTheme.typography.titleMedium
                     )
+
+                    Text(
+                        text = "Acceleration Mode",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        val modes = listOf(
+                            GenerationPreferences.HardwareAccelerationMode.GPU,
+                            GenerationPreferences.HardwareAccelerationMode.CPU
+                        )
+                        modes.forEachIndexed { index, mode ->
+                            SegmentedButton(
+                                selected = hardwareAccelerationMode == mode,
+                                onClick = { viewModel.setHardwareAccelerationMode(mode) },
+                                shape = SegmentedButtonDefaults.itemShape(index = index, count = modes.size),
+                                label = {
+                                    Text(
+                                        when (mode) {
+                                            GenerationPreferences.HardwareAccelerationMode.GPU -> "GPU (default)"
+                                            GenerationPreferences.HardwareAccelerationMode.CPU -> "CPU"
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = if (hardwareAccelerationMode == GenerationPreferences.HardwareAccelerationMode.GPU) {
+                            "GPU mode is prioritized. CPU is used automatically as fallback when needed."
+                        } else {
+                            "CPU mode is forced for maximum compatibility and lower power draw."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     
                     SettingSlider(
                         label = "Context Length",
@@ -535,24 +606,26 @@ fun SettingsScreen(
                                 "Match to your device's CPU cores for best performance.",
                         onReset = viewModel::resetCpuThreads
                     )
-                    
-                    Divider()
-                    
-                    SettingSlider(
-                        label = "GPU Layers",
-                        value = gpuLayers.toFloat(),
-                        onValueChange = { viewModel.setGpuLayers(it.toInt()) },
-                        valueRange = 0f..50f,
-                        steps = 49,
-                        valueFormatter = { it.toInt().toString() },
-                        info = "Number of model layers offloaded to GPU.\n\n" +
-                                "• 0: CPU only (slower, less battery drain)\n" +
-                                "• 10-20: Partial GPU acceleration\n" +
-                                "• 30-50: Maximum GPU acceleration (fastest, more battery drain)\n\n" +
-                                "⚠️ Requires model reload to take effect.\n" +
-                                "Higher values use more VRAM but increase speed significantly.",
-                        onReset = viewModel::resetGpuLayers
-                    )
+
+                    if (hardwareAccelerationMode == GenerationPreferences.HardwareAccelerationMode.GPU) {
+                        Divider()
+
+                        SettingSlider(
+                            label = "GPU Layers",
+                            value = gpuLayers.toFloat(),
+                            onValueChange = { viewModel.setGpuLayers(it.toInt()) },
+                            valueRange = 1f..100f,
+                            steps = 98,
+                            valueFormatter = { it.toInt().toString() },
+                            info = "Number of model layers offloaded to GPU.\n\n" +
+                                    "• 1-20: Light GPU offload\n" +
+                                    "• 20-60: Balanced offload\n" +
+                                    "• 60-100: Maximum GPU offload\n\n" +
+                                    "⚠️ Requires model reload to take effect.\n" +
+                                    "Higher values prioritize GPU execution while CPU handles fallback work.",
+                            onReset = viewModel::resetGpuLayers
+                        )
+                    }
                 }
             }
             

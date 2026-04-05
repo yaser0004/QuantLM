@@ -6,12 +6,14 @@ import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import com.quantlm.yaser.data.inference.LlamaEngine
 import com.quantlm.yaser.data.inference.MediaPipeEngine
 import com.quantlm.yaser.data.inference.ModelManager
+import com.quantlm.yaser.data.local.GenerationPreferences
 import com.quantlm.yaser.data.local.ModelPreferences
 import com.quantlm.yaser.domain.inference.InferenceConfig
 import com.quantlm.yaser.domain.model.ModelConfig
 import com.quantlm.yaser.domain.model.ModelFormat
 import com.quantlm.yaser.domain.model.ModelInfo
 import com.quantlm.yaser.domain.model.ModelLoadingState
+import com.quantlm.yaser.domain.model.ModelProfileRegistry
 import com.quantlm.yaser.domain.repository.ModelRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -42,7 +44,8 @@ class ModelRepositoryImpl @Inject constructor(
     private val llamaEngine: LlamaEngine,
     private val mediaPipeEngine: MediaPipeEngine,
     private val modelManager: ModelManager,
-    private val modelPreferences: ModelPreferences
+    private val modelPreferences: ModelPreferences,
+    private val generationPreferences: GenerationPreferences
 ) : ModelRepository {
     
     companion object {
@@ -171,6 +174,25 @@ class ModelRepositoryImpl @Inject constructor(
 
     private fun hasZipMagic(file: File): Boolean = findZipMagicOffset(file) != null
 
+    private fun resolveGpuLayers(
+        requestedGpuLayers: Int,
+        hardware: GenerationPreferences.HardwareSettings
+    ): Int {
+        val persistedLayers = hardware.gpuLayers.coerceIn(0, 100)
+        val callerLayers = requestedGpuLayers.coerceIn(0, 100)
+
+        return when (hardware.accelerationMode) {
+            GenerationPreferences.HardwareAccelerationMode.CPU -> 0
+            GenerationPreferences.HardwareAccelerationMode.GPU -> {
+                when {
+                    callerLayers > 0 -> callerLayers
+                    persistedLayers > 0 -> persistedLayers
+                    else -> 1
+                }
+            }
+        }
+    }
+
     private fun readMagicHex(file: File, length: Int = 8): String {
         return try {
             file.inputStream().use { input ->
@@ -283,13 +305,22 @@ class ModelRepositoryImpl @Inject constructor(
     }
     
     override suspend fun loadModel(config: ModelConfig): Result<Unit> = modelLoadMutex.withLock {
+        val persistedHardware = generationPreferences
+            .getHardwareSettings()
+            .firstOrNull()
+        val effectiveConfig = if (persistedHardware != null) {
+            config.copy(nGpuLayers = resolveGpuLayers(config.nGpuLayers, persistedHardware))
+        } else {
+            config
+        }
+
         val currentModel = _loadedModel.value
         
         // Set loading state - show switching if there's a current model
         if (currentModel != null) {
-            _loadingState.value = ModelLoadingState.Switching(currentModel.name, config.name)
+            _loadingState.value = ModelLoadingState.Switching(currentModel.name, effectiveConfig.name)
         } else {
-            _loadingState.value = ModelLoadingState.Loading(config.name)
+            _loadingState.value = ModelLoadingState.Loading(effectiveConfig.name)
         }
         
         // Unload any currently loaded model first
@@ -298,19 +329,19 @@ class ModelRepositoryImpl @Inject constructor(
         }
         
         // Determine which engine to use based on file format
-        val engineType = getEngineType(config.filePath)
-        val modelFormat = getModelFormat(config.filePath)
+        val engineType = getEngineType(effectiveConfig.filePath)
+        val modelFormat = getModelFormat(effectiveConfig.filePath)
         
-        Log.d(TAG, "Loading model: ${config.name}, format: $modelFormat, engine: $engineType")
+        Log.d(TAG, "Loading model: ${effectiveConfig.name}, format: $modelFormat, engine: $engineType")
         AppEventLogger.info(
             component = TAG,
             action = "load_requested",
-            details = "name=${config.name}, format=$modelFormat, engine=$engineType, vision=${config.isVisionModel}, context=${config.contextLength}"
+            details = "name=${effectiveConfig.name}, format=$modelFormat, engine=$engineType, vision=${effectiveConfig.isVisionModel}, context=${effectiveConfig.contextLength}, gpuLayers=${effectiveConfig.nGpuLayers}"
         )
         
         val result = when (engineType) {
-            EngineType.LLAMA -> loadWithLlamaEngine(config)
-            EngineType.MEDIAPIPE -> loadWithMediaPipeEngine(config)
+            EngineType.LLAMA -> loadWithLlamaEngine(effectiveConfig)
+            EngineType.MEDIAPIPE -> loadWithMediaPipeEngine(effectiveConfig)
             EngineType.NONE -> Result.failure(Exception("Unsupported model format"))
         }
         
@@ -318,44 +349,55 @@ class ModelRepositoryImpl @Inject constructor(
             currentEngineType = engineType
             
             val modelInfo = ModelInfo(
-                name = config.name,
-                filePath = config.filePath,
-                size = config.size,
+                name = effectiveConfig.name,
+                filePath = effectiveConfig.filePath,
+                size = effectiveConfig.size,
                 isLoaded = true,
                 metadata = getModelMetadata(engineType),
-                isVisionModel = config.isVisionModel || isVisionSupported(engineType),
-                mmprojPath = config.mmprojPath
+                isVisionModel = effectiveConfig.isVisionModel || isVisionSupported(engineType),
+                mmprojPath = effectiveConfig.mmprojPath
             )
             _loadedModel.value = modelInfo
             
             // Persist the loaded model info
             try {
                 modelPreferences.saveLoadedModel(
-                    name = config.name,
-                    filePath = config.filePath,
-                    size = config.size,
+                    name = effectiveConfig.name,
+                    filePath = effectiveConfig.filePath,
+                    size = effectiveConfig.size,
                     isVisionModel = modelInfo.isVisionModel,
-                    mmprojPath = config.mmprojPath
+                    mmprojPath = effectiveConfig.mmprojPath
                 )
-                Log.d(TAG, "Saved model to preferences: ${config.name}")
+                Log.d(TAG, "Saved model to preferences: ${effectiveConfig.name}")
             } catch (e: Exception) {
                 Log.e(TAG, "Error saving model to preferences", e)
             }
+
+            try {
+                applyModelProfileOverrides(effectiveConfig.filePath)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to apply model profile overrides", e)
+                AppEventLogger.warn(
+                    component = TAG,
+                    action = "model_profile_override_failed",
+                    details = "path=${effectiveConfig.filePath}, reason=${e.message ?: "unknown"}"
+                )
+            }
             
             // Set loaded state briefly, then return to idle
-            _loadingState.value = ModelLoadingState.Loaded(config.name)
+            _loadingState.value = ModelLoadingState.Loaded(effectiveConfig.name)
             _loadingState.value = ModelLoadingState.Idle
             AppEventLogger.info(
                 component = TAG,
                 action = "load_success",
-                details = "name=${config.name}, engine=$engineType"
+                details = "name=${effectiveConfig.name}, engine=$engineType, gpuLayers=${effectiveConfig.nGpuLayers}"
             )
         } else {
             currentEngineType = EngineType.NONE
             AppEventLogger.error(
                 component = TAG,
                 action = "load_failed",
-                details = "name=${config.name}, engine=$engineType, reason=${result.exceptionOrNull()?.message ?: "unknown"}",
+                details = "name=${effectiveConfig.name}, engine=$engineType, reason=${result.exceptionOrNull()?.message ?: "unknown"}",
                 throwable = result.exceptionOrNull()
             )
             _loadingState.value = ModelLoadingState.Error(result.exceptionOrNull()?.message ?: "Unknown error")
@@ -364,6 +406,20 @@ class ModelRepositoryImpl @Inject constructor(
         }
         
         result
+    }
+
+    private suspend fun applyModelProfileOverrides(filePath: String) {
+        val loadedFileName = File(filePath).name
+        val modelId = modelManager.resolveModelIdForLoadedFileName(loadedFileName)
+        val modelKey = modelId ?: File(filePath).nameWithoutExtension
+        val profile = ModelProfileRegistry.getProfileForModel(modelKey)
+        generationPreferences.applyModelProfile(profile)
+
+        AppEventLogger.info(
+            component = TAG,
+            action = "model_profile_applied",
+            details = "loadedFileName=$loadedFileName, modelKey=$modelKey, family=${profile.family}"
+        )
     }
     
     /**

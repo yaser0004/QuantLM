@@ -14,7 +14,7 @@
 
 # Uncomment this to preserve the line number information for
 # debugging stack traces.
--keepattributes SourceFile,LineNumberTable
+-keepattributes SourceFile,LineNumberTable,*Annotation*
 
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
@@ -33,7 +33,30 @@
 # Keep Hilt generated classes
 -keep class dagger.hilt.** { *; }
 -keep class javax.inject.** { *; }
--keep class * extends dagger.hilt.android.lifecycle.HiltViewModel
+-keep class androidx.hilt.** { *; }
+
+# Keep Hilt ViewModels annotated with @HiltViewModel.
+-keep @dagger.hilt.android.lifecycle.HiltViewModel class * extends androidx.lifecycle.ViewModel { *; }
+
+# Keep custom engine qualifier annotations used in DI wiring.
+-keep @interface com.quantlm.yaser.di.LlamaEngineQualifier
+-keep @interface com.quantlm.yaser.di.LiteRTEngineQualifier
+-keep @interface com.quantlm.yaser.di.TFLiteEngineQualifier
+
+# Keep generated Dagger/Hilt classes used at runtime.
+-keep class **_HiltModules { *; }
+-keep class **_HiltModules$* { *; }
+-keep class **_Factory { *; }
+-keep class **_MembersInjector { *; }
+
+# JNI bridge in llama_jni.cpp resolves these callback methods by name using GetMethodID.
+# Keep interface + implementation member names to avoid release-only NoSuchMethodError.
+-keep class com.quantlm.yaser.data.inference.LlamaEngine$StreamCallback { *; }
+-keepclassmembers class * implements com.quantlm.yaser.data.inference.LlamaEngine$StreamCallback {
+    public void onToken(java.lang.String);
+    public void onComplete();
+    public void onError(java.lang.String);
+}
 
 # Suppress optional/compile-only references reported by R8 for release minification.
 -dontwarn javax.lang.model.SourceVersion

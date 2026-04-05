@@ -89,7 +89,8 @@ class InferenceRepositoryImpl @Inject constructor(
         typicalP: Float,
         mirostat: Int,
         mirostatTau: Float,
-        mirostatEta: Float
+        mirostatEta: Float,
+        stopSequences: List<String>
     ): Result<String> {
         return when {
             isLlamaActive() -> {
@@ -127,7 +128,8 @@ class InferenceRepositoryImpl @Inject constructor(
                         typicalP = typicalP,
                         mirostat = mirostat,
                         mirostatTau = mirostatTau,
-                        mirostatEta = mirostatEta
+                        mirostatEta = mirostatEta,
+                        stopSequences = stopSequences
                     )
                     val result = mediaPipeEngine.generate(prompt, params)
                     Result.success(result)
@@ -161,7 +163,8 @@ class InferenceRepositoryImpl @Inject constructor(
         typicalP: Float,
         mirostat: Int,
         mirostatTau: Float,
-        mirostatEta: Float
+        mirostatEta: Float,
+        stopSequences: List<String>
     ): Flow<GenerationState> = callbackFlow {
         
         trySend(GenerationState.Loading)
@@ -220,7 +223,8 @@ class InferenceRepositoryImpl @Inject constructor(
                         typicalP = typicalP,
                         mirostat = mirostat,
                         mirostatTau = mirostatTau,
-                        mirostatEta = mirostatEta
+                        mirostatEta = mirostatEta,
+                        stopSequences = stopSequences
                     )
                     val callback = object : LlamaEngine.StreamCallback {
                         override fun onToken(token: String) {
@@ -297,6 +301,22 @@ class InferenceRepositoryImpl @Inject constructor(
             else -> null
         }
     }
+
+    override fun getActiveBackendLabel(): String {
+        return when {
+            isLlamaActive() -> llamaEngine.getActiveBackendLabel()
+            isMediaPipeActive() -> "MediaPipe (device-optimized)"
+            else -> "Unknown"
+        }
+    }
+
+    override fun getActiveModelFormatLabel(): String {
+        return when {
+            isLlamaActive() -> "GGUF"
+            isMediaPipeActive() -> "TASK/LiteRT"
+            else -> "Unknown"
+        }
+    }
     
     override fun isVisionSupported(): Boolean {
         return when {
@@ -320,7 +340,8 @@ class InferenceRepositoryImpl @Inject constructor(
         typicalP: Float,
         mirostat: Int,
         mirostatTau: Float,
-        mirostatEta: Float
+        mirostatEta: Float,
+        stopSequences: List<String>
     ): Result<String> {
         return when {
             isLlamaActive() && llamaEngine.isVisionSupported() -> {
@@ -357,7 +378,8 @@ class InferenceRepositoryImpl @Inject constructor(
                         typicalP = typicalP,
                         mirostat = mirostat,
                         mirostatTau = mirostatTau,
-                        mirostatEta = mirostatEta
+                        mirostatEta = mirostatEta,
+                        stopSequences = stopSequences
                     )
                     val resultBuilder = StringBuilder()
                     val callback = object : LlamaEngine.StreamCallback {
@@ -393,7 +415,8 @@ class InferenceRepositoryImpl @Inject constructor(
         typicalP: Float,
         mirostat: Int,
         mirostatTau: Float,
-        mirostatEta: Float
+        mirostatEta: Float,
+        stopSequences: List<String>
     ): Flow<GenerationState> = callbackFlow {
         
         trySend(GenerationState.Loading)
@@ -451,7 +474,8 @@ class InferenceRepositoryImpl @Inject constructor(
                         typicalP = typicalP,
                         mirostat = mirostat,
                         mirostatTau = mirostatTau,
-                        mirostatEta = mirostatEta
+                        mirostatEta = mirostatEta,
+                        stopSequences = stopSequences
                     )
                     val callback = object : LlamaEngine.StreamCallback {
                         override fun onToken(token: String) {

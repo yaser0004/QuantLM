@@ -39,5 +39,7 @@ data class MessageEntity(
     val generationTopK: Int = 0,               // Top-K setting
     val generationMaxTokens: Int = 0,          // Max tokens setting
     val wasVisionRequest: Boolean = false,     // Was this a vision request
-    val generationImageCount: Int = 0          // Images in prompt (assistant stats; user message paths are separate)
+    val generationImageCount: Int = 0,         // Images in prompt (assistant stats; user message paths are separate)
+    val generationBackend: String? = null,     // Backend used (CPU/GPU)
+    val generationModelFormat: String? = null  // Model format (GGUF, TASK, etc.)
 )

@@ -2,9 +2,11 @@ package com.quantlm.yaser.presentation.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.quantlm.yaser.data.inference.ModelManager
 import com.quantlm.yaser.data.local.GenerationPreferences
 import com.quantlm.yaser.domain.model.ModelConfig
 import com.quantlm.yaser.domain.model.ModelLoadingState
+import com.quantlm.yaser.domain.model.ModelProfileRegistry
 import com.quantlm.yaser.domain.repository.ChatRepository
 import com.quantlm.yaser.domain.repository.ModelRepository
 import com.quantlm.yaser.domain.tts.TtsVoiceProfile
@@ -13,6 +15,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import java.io.File
 import kotlin.math.roundToInt
 import javax.inject.Inject
 
@@ -21,7 +24,8 @@ class SettingsViewModel @Inject constructor(
     private val modelRepository: ModelRepository,
     private val chatRepository: ChatRepository,
     private val loadModelUseCase: LoadModelUseCase,
-    private val generationPreferences: GenerationPreferences
+    private val generationPreferences: GenerationPreferences,
+    private val modelManager: ModelManager
 ) : ViewModel() {
 
     private val detectedCpuThreads = detectCpuThreads()
@@ -70,6 +74,9 @@ class SettingsViewModel @Inject constructor(
     val mirostatEta = _generationSettings.map { it.mirostatEta }
         .stateIn(viewModelScope, SharingStarted.Lazily, 0.1f)
 
+    val isAdvancedInferenceEnabled = _generationSettings.map { it.isAdvancedInferenceEnabled }
+        .stateIn(viewModelScope, SharingStarted.Lazily, false)
+
     val ttsVoiceProfile = _generationSettings.map { it.ttsVoiceProfile }
         .stateIn(viewModelScope, SharingStarted.Lazily, TtsVoiceProfile.CLASSIC_LEGACY)
 
@@ -84,6 +91,9 @@ class SettingsViewModel @Inject constructor(
     
     private val _gpuLayers = MutableStateFlow(GenerationPreferences.DEFAULT_GPU_LAYERS)
     val gpuLayers = _gpuLayers.asStateFlow()
+
+    private val _hardwareAccelerationMode = MutableStateFlow(GenerationPreferences.HardwareAccelerationMode.GPU)
+    val hardwareAccelerationMode = _hardwareAccelerationMode.asStateFlow()
     
     private val _isLoading = MutableStateFlow(false)
     val isLoading = _isLoading.asStateFlow()
@@ -107,6 +117,7 @@ class SettingsViewModel @Inject constructor(
                 _contextLength.value = hardware.contextLength.coerceIn(512, 8192)
                 _cpuThreads.value = hardware.cpuThreads.coerceIn(1, 16)
                 _gpuLayers.value = hardware.gpuLayers.coerceIn(0, 100)
+                _hardwareAccelerationMode.value = hardware.accelerationMode
             }
         }
     }
@@ -115,7 +126,7 @@ class SettingsViewModel @Inject constructor(
     private var loadModelJob: Job? = null
     
     fun setTemperature(value: Float) {
-        val coerced = value.coerceIn(0f, 2f)
+        val coerced = value.coerceIn(0f, 1.5f)
         viewModelScope.launch {
             generationPreferences.saveTemperature(coerced)
         }
@@ -137,7 +148,7 @@ class SettingsViewModel @Inject constructor(
     }
     
     fun setTopP(value: Float) {
-        val coerced = value.coerceIn(0f, 1f)
+        val coerced = value.coerceIn(0.1f, 1f)
         viewModelScope.launch {
             generationPreferences.saveTopP(coerced)
         }
@@ -159,7 +170,7 @@ class SettingsViewModel @Inject constructor(
     }
     
     fun setRepeatPenalty(value: Float) {
-        val coerced = value.coerceIn(1.0f, 2.0f)
+        val coerced = value.coerceIn(1.0f, 1.3f)
         viewModelScope.launch {
             generationPreferences.saveRepeatPenalty(coerced)
         }
@@ -181,7 +192,7 @@ class SettingsViewModel @Inject constructor(
     }
     
     fun setMinP(value: Float) {
-        val coerced = value.coerceIn(0.0f, 1.0f)
+        val coerced = value.coerceIn(0.0f, 0.2f)
         viewModelScope.launch {
             generationPreferences.saveMinP(coerced)
         }
@@ -245,6 +256,41 @@ class SettingsViewModel @Inject constructor(
     fun resetMirostatEta() {
         setMirostatEta(GenerationPreferences.DEFAULT_MIROSTAT_ETA)
     }
+
+    fun setAdvancedInferenceEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            generationPreferences.saveAdvancedInferenceEnabled(enabled)
+        }
+    }
+
+    fun resetToModelDefaults() {
+        viewModelScope.launch {
+            val model = loadedModel.value
+            if (model == null) {
+                _message.value = "Load a model first to reset defaults"
+                return@launch
+            }
+
+            val loadedFileName = File(model.filePath).name
+            val modelId = modelManager.resolveModelIdForLoadedFileName(loadedFileName)
+                ?: model.name
+            val profile = ModelProfileRegistry.getProfileForModel(modelId)
+
+            generationPreferences.saveTemperature(profile.defaultTemperature)
+            generationPreferences.saveTopP(profile.topP)
+            generationPreferences.saveMinP(profile.minP)
+            generationPreferences.saveRepeatPenalty(profile.repetitionPenalty)
+
+            _generationSettings.value = _generationSettings.value.copy(
+                temperature = profile.defaultTemperature,
+                topP = profile.topP,
+                minP = profile.minP,
+                repeatPenalty = profile.repetitionPenalty
+            )
+
+            _message.value = "Inference controls reset to ${profile.family} defaults"
+        }
+    }
     
     fun setContextLength(value: Int) {
         val coerced = value.coerceIn(512, 8192)
@@ -271,7 +317,8 @@ class SettingsViewModel @Inject constructor(
     }
     
     fun setGpuLayers(value: Int) {
-        val coerced = value.coerceIn(0, 100)
+        val minLayers = if (_hardwareAccelerationMode.value == GenerationPreferences.HardwareAccelerationMode.GPU) 1 else 0
+        val coerced = value.coerceIn(minLayers, 100)
         _gpuLayers.value = coerced
         viewModelScope.launch {
             generationPreferences.saveGpuLayers(coerced)
@@ -280,6 +327,18 @@ class SettingsViewModel @Inject constructor(
 
     fun resetGpuLayers() {
         setGpuLayers(GenerationPreferences.DEFAULT_GPU_LAYERS)
+    }
+
+    fun setHardwareAccelerationMode(mode: GenerationPreferences.HardwareAccelerationMode) {
+        _hardwareAccelerationMode.value = mode
+        viewModelScope.launch {
+            generationPreferences.saveHardwareAccelerationMode(mode)
+            if (mode == GenerationPreferences.HardwareAccelerationMode.GPU && _gpuLayers.value <= 0) {
+                val defaultLayers = GenerationPreferences.DEFAULT_GPU_LAYERS.coerceIn(1, 100)
+                _gpuLayers.value = defaultLayers
+                generationPreferences.saveGpuLayers(defaultLayers)
+            }
+        }
     }
 
     private fun detectCpuThreads(): Int {
@@ -336,11 +395,15 @@ class SettingsViewModel @Inject constructor(
                 .first()
             val effectiveContextLength = persistedHardware.contextLength.coerceIn(512, 8192)
             val effectiveCpuThreads = persistedHardware.cpuThreads.coerceIn(1, 16)
-            val effectiveGpuLayers = persistedHardware.gpuLayers.coerceIn(0, 100)
+            val effectiveGpuLayers = when (persistedHardware.accelerationMode) {
+                GenerationPreferences.HardwareAccelerationMode.CPU -> 0
+                GenerationPreferences.HardwareAccelerationMode.GPU -> persistedHardware.gpuLayers.coerceIn(1, 100)
+            }
 
             _contextLength.value = effectiveContextLength
             _cpuThreads.value = effectiveCpuThreads
             _gpuLayers.value = effectiveGpuLayers
+            _hardwareAccelerationMode.value = persistedHardware.accelerationMode
             
             val currentSettings = _generationSettings.value
             val config = ModelConfig(
@@ -390,8 +453,9 @@ class SettingsViewModel @Inject constructor(
     
     fun applyPreset(preset: String) {
         viewModelScope.launch {
+            val currentSettings = _generationSettings.value
             val newSettings = when (preset) {
-                "precise" -> GenerationPreferences.GenerationSettings(
+                "precise" -> currentSettings.copy(
                     temperature = 0.2f,
                     maxTokens = 256,
                     topP = 0.7f,
@@ -406,7 +470,7 @@ class SettingsViewModel @Inject constructor(
                     mirostatEta = 0.1f,
                     systemPrompt = _systemPrompt.value
                 )
-                "balanced" -> GenerationPreferences.GenerationSettings(
+                "balanced" -> currentSettings.copy(
                     temperature = 0.7f,
                     maxTokens = 512,
                     topP = 0.9f,
@@ -421,7 +485,7 @@ class SettingsViewModel @Inject constructor(
                     mirostatEta = 0.1f,
                     systemPrompt = _systemPrompt.value
                 )
-                "creative" -> GenerationPreferences.GenerationSettings(
+                "creative" -> currentSettings.copy(
                     temperature = 1.2f,
                     maxTokens = 512,
                     topP = 0.95f,
@@ -436,7 +500,7 @@ class SettingsViewModel @Inject constructor(
                     mirostatEta = 0.1f,
                     systemPrompt = _systemPrompt.value
                 )
-                "focused" -> GenerationPreferences.GenerationSettings(
+                "focused" -> currentSettings.copy(
                     temperature = 0.7f,
                     maxTokens = 256,
                     topP = 0.9f,

@@ -2469,6 +2469,12 @@ fun GenerationStatsDialog(
                 if (stats.modelName.isNotEmpty()) {
                     StatsRow(label = "Model", value = stats.modelName)
                 }
+                if (stats.modelFormat.isNotEmpty()) {
+                    StatsRow(label = "Model Format", value = stats.modelFormat)
+                }
+                if (stats.backend.isNotEmpty()) {
+                    StatsRow(label = "Backend Used", value = stats.backend)
+                }
                 StatsRow(label = "Temperature", value = String.format("%.2f", stats.temperature))
                 StatsRow(label = "Top-P", value = String.format("%.2f", stats.topP))
                 StatsRow(label = "Top-K", value = stats.topK.toString())

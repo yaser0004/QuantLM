@@ -1,8 +1,6 @@
 package com.quantlm.yaser.domain.inference
 
 import com.quantlm.yaser.domain.model.ModelFormat
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * Manager for handling multiple inference engines.
@@ -12,8 +10,7 @@ import javax.inject.Singleton
  * This enables seamless switching between different model frameworks
  * (GGUF, TFLite, etc.) from the user's perspective.
  */
-@Singleton
-class InferenceEngineManager @Inject constructor(
+class InferenceEngineManager(
     private val engines: Map<ModelFormat, @JvmSuppressWildcards InferenceEngine>
 ) {
     

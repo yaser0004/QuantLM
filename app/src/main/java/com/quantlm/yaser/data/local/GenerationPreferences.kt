@@ -3,14 +3,17 @@ package com.quantlm.yaser.data.local
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.quantlm.yaser.data.diagnostics.AppEventLogger
+import com.quantlm.yaser.domain.model.ModelProfile
 import com.quantlm.yaser.domain.tts.TtsVoiceProfile
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "generation_settings")
@@ -32,14 +35,18 @@ class GenerationPreferences(private val context: Context) {
         private val MIROSTAT = intPreferencesKey("mirostat")
         private val MIROSTAT_TAU = floatPreferencesKey("mirostat_tau")
         private val MIROSTAT_ETA = floatPreferencesKey("mirostat_eta")
+        private val STOP_SEQUENCES = stringPreferencesKey("stop_sequences")
+        private val ADVANCED_INFERENCE_ENABLED = booleanPreferencesKey("advanced_inference_enabled")
         private val CONTEXT_LENGTH = intPreferencesKey("context_length")
         private val CPU_THREADS = intPreferencesKey("cpu_threads")
         private val GPU_LAYERS = intPreferencesKey("gpu_layers")
+        private val HARDWARE_ACCELERATION_MODE = stringPreferencesKey("hardware_acceleration_mode")
         private val SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
         private val TTS_VOICE_GENDER = stringPreferencesKey("tts_voice_gender")
         private val TTS_VOICE_PROFILE = stringPreferencesKey("tts_voice_profile")
         private const val LEGACY_DEFAULT_PROMPT = "You are a helpful AI assistant."
         private const val LEGACY_NO_EMOJI_PROMPT = "You are a helpful AI assistant. Do not use emoji characters in your responses - use text-based emoticons like :) or <3 instead."
+        private const val STOP_SEQUENCE_SEPARATOR = "\n"
         
         // Defaults
         const val DEFAULT_TEMPERATURE = 0.7f
@@ -56,8 +63,19 @@ class GenerationPreferences(private val context: Context) {
         const val DEFAULT_MIROSTAT_ETA = 0.1f
         const val DEFAULT_CONTEXT_LENGTH = 2048
         const val DEFAULT_CPU_THREADS = 4
-        const val DEFAULT_GPU_LAYERS = 0
+        const val DEFAULT_GPU_LAYERS = 99
         const val DEFAULT_SYSTEM_PROMPT = ""
+    }
+
+    enum class HardwareAccelerationMode(val storageValue: String) {
+        GPU("gpu"),
+        CPU("cpu");
+
+        companion object {
+            fun fromStorage(value: String?): HardwareAccelerationMode {
+                return entries.firstOrNull { it.storageValue == value } ?: GPU
+            }
+        }
     }
     
     data class GenerationSettings(
@@ -73,6 +91,8 @@ class GenerationPreferences(private val context: Context) {
         val mirostat: Int = DEFAULT_MIROSTAT,
         val mirostatTau: Float = DEFAULT_MIROSTAT_TAU,
         val mirostatEta: Float = DEFAULT_MIROSTAT_ETA,
+        val stopSequences: List<String> = emptyList(),
+        val isAdvancedInferenceEnabled: Boolean = false,
         val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
         val ttsVoiceProfile: TtsVoiceProfile = TtsVoiceProfile.CLASSIC_LEGACY
     )
@@ -80,7 +100,8 @@ class GenerationPreferences(private val context: Context) {
     data class HardwareSettings(
         val contextLength: Int = DEFAULT_CONTEXT_LENGTH,
         val cpuThreads: Int = DEFAULT_CPU_THREADS,
-        val gpuLayers: Int = DEFAULT_GPU_LAYERS
+        val gpuLayers: Int = DEFAULT_GPU_LAYERS,
+        val accelerationMode: HardwareAccelerationMode = HardwareAccelerationMode.GPU
     )
     
     suspend fun saveSettings(settings: GenerationSettings) {
@@ -97,13 +118,34 @@ class GenerationPreferences(private val context: Context) {
             preferences[MIROSTAT] = settings.mirostat
             preferences[MIROSTAT_TAU] = settings.mirostatTau
             preferences[MIROSTAT_ETA] = settings.mirostatEta
+            preferences[STOP_SEQUENCES] = encodeStopSequences(settings.stopSequences)
+            preferences[ADVANCED_INFERENCE_ENABLED] = settings.isAdvancedInferenceEnabled
             preferences[SYSTEM_PROMPT] = settings.systemPrompt
             preferences[TTS_VOICE_PROFILE] = settings.ttsVoiceProfile.storageValue
         }
         AppEventLogger.info(
             component = TAG,
             action = "save_settings",
-            details = "temp=${settings.temperature}, maxTokens=${settings.maxTokens}, topP=${settings.topP}, topK=${settings.topK}, voice=${settings.ttsVoiceProfile.storageValue}"
+            details = "temp=${settings.temperature}, maxTokens=${settings.maxTokens}, topP=${settings.topP}, topK=${settings.topK}, stops=${settings.stopSequences.size}, voice=${settings.ttsVoiceProfile.storageValue}"
+        )
+    }
+
+    suspend fun applyModelProfile(profile: ModelProfile) {
+        val current = getSettings().first()
+        val updated = current.copy(
+            temperature = profile.defaultTemperature,
+            repeatPenalty = profile.repetitionPenalty,
+            minP = profile.minP,
+            topP = profile.topP,
+            topK = profile.topK,
+            stopSequences = profile.stopTokens
+        )
+
+        saveSettings(updated)
+        AppEventLogger.info(
+            component = TAG,
+            action = "apply_model_profile",
+            details = "family=${profile.family}, temp=${profile.defaultTemperature}, repPenalty=${profile.repetitionPenalty}, minP=${profile.minP}, topP=${profile.topP}, topK=${profile.topK}, stops=${profile.stopTokens.size}"
         )
     }
     
@@ -130,6 +172,8 @@ class GenerationPreferences(private val context: Context) {
                 mirostat = preferences[MIROSTAT] ?: DEFAULT_MIROSTAT,
                 mirostatTau = preferences[MIROSTAT_TAU] ?: DEFAULT_MIROSTAT_TAU,
                 mirostatEta = preferences[MIROSTAT_ETA] ?: DEFAULT_MIROSTAT_ETA,
+                stopSequences = decodeStopSequences(preferences[STOP_SEQUENCES]),
+                isAdvancedInferenceEnabled = preferences[ADVANCED_INFERENCE_ENABLED] ?: false,
                 systemPrompt = resolvedPrompt,
                 ttsVoiceProfile = TtsVoiceProfile.fromStorage(
                     preferences[TTS_VOICE_PROFILE],
@@ -139,12 +183,41 @@ class GenerationPreferences(private val context: Context) {
         }
     }
 
+    private fun encodeStopSequences(stopSequences: List<String>): String {
+        return stopSequences
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString(STOP_SEQUENCE_SEPARATOR)
+    }
+
+    private fun decodeStopSequences(encoded: String?): List<String> {
+        if (encoded.isNullOrBlank()) {
+            return emptyList()
+        }
+
+        return encoded
+            .split(STOP_SEQUENCE_SEPARATOR)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+    }
+
     fun getHardwareSettings(defaultCpuThreads: Int = DEFAULT_CPU_THREADS): Flow<HardwareSettings> {
         return context.settingsDataStore.data.map { preferences ->
+            val storedMode = preferences[HARDWARE_ACCELERATION_MODE]
+            val accelerationMode = HardwareAccelerationMode.fromStorage(storedMode)
+            val storedGpuLayers = preferences[GPU_LAYERS]
+            val resolvedGpuLayers = when {
+                accelerationMode == HardwareAccelerationMode.CPU -> storedGpuLayers ?: 0
+                storedGpuLayers == null -> DEFAULT_GPU_LAYERS
+                storedGpuLayers == 0 && storedMode == null -> DEFAULT_GPU_LAYERS
+                else -> storedGpuLayers
+            }
+
             HardwareSettings(
                 contextLength = preferences[CONTEXT_LENGTH] ?: DEFAULT_CONTEXT_LENGTH,
                 cpuThreads = preferences[CPU_THREADS] ?: defaultCpuThreads,
-                gpuLayers = preferences[GPU_LAYERS] ?: DEFAULT_GPU_LAYERS
+                gpuLayers = resolvedGpuLayers,
+                accelerationMode = accelerationMode
             )
         }
     }
@@ -233,6 +306,19 @@ class GenerationPreferences(private val context: Context) {
         AppEventLogger.debug(component = TAG, action = "save_mirostat_eta", details = "value=$value")
     }
 
+    suspend fun saveAdvancedInferenceEnabled(value: Boolean) {
+        context.settingsDataStore.edit { preferences ->
+            preferences[ADVANCED_INFERENCE_ENABLED] = value
+        }
+        AppEventLogger.info(component = TAG, action = "save_advanced_inference_enabled", details = "value=$value")
+    }
+
+    fun isAdvancedInferenceEnabled(): Flow<Boolean> {
+        return context.settingsDataStore.data.map { preferences ->
+            preferences[ADVANCED_INFERENCE_ENABLED] ?: false
+        }
+    }
+
     suspend fun saveContextLength(value: Int) {
         context.settingsDataStore.edit { preferences ->
             preferences[CONTEXT_LENGTH] = value
@@ -252,6 +338,17 @@ class GenerationPreferences(private val context: Context) {
             preferences[GPU_LAYERS] = value
         }
         AppEventLogger.debug(component = TAG, action = "save_gpu_layers", details = "value=$value")
+    }
+
+    suspend fun saveHardwareAccelerationMode(mode: HardwareAccelerationMode) {
+        context.settingsDataStore.edit { preferences ->
+            preferences[HARDWARE_ACCELERATION_MODE] = mode.storageValue
+        }
+        AppEventLogger.info(
+            component = TAG,
+            action = "save_hardware_acceleration_mode",
+            details = "mode=${mode.storageValue}"
+        )
     }
 
     suspend fun saveSystemPrompt(value: String) {

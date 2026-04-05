@@ -18,7 +18,8 @@ interface InferenceRepository {
         typicalP: Float = 1.0f,
         mirostat: Int = 0,
         mirostatTau: Float = 5.0f,
-        mirostatEta: Float = 0.1f
+        mirostatEta: Float = 0.1f,
+        stopSequences: List<String> = emptyList()
     ): Result<String>
     
     fun generateStream(
@@ -34,7 +35,8 @@ interface InferenceRepository {
         typicalP: Float = 1.0f,
         mirostat: Int = 0,
         mirostatTau: Float = 5.0f,
-        mirostatEta: Float = 0.1f
+        mirostatEta: Float = 0.1f,
+        stopSequences: List<String> = emptyList()
     ): Flow<GenerationState>
     
     suspend fun stopGeneration()
@@ -51,6 +53,16 @@ interface InferenceRepository {
      * Returns null if no model is loaded.
      */
     fun getLoadedModelName(): String?
+
+    /**
+     * Get the active inference backend label (for example CPU or GPU).
+     */
+    fun getActiveBackendLabel(): String
+
+    /**
+     * Get the active model format label (for example GGUF or LiteRT).
+     */
+    fun getActiveModelFormatLabel(): String
     
     // Vision model methods
     fun isVisionSupported(): Boolean
@@ -69,7 +81,8 @@ interface InferenceRepository {
         typicalP: Float = 1.0f,
         mirostat: Int = 0,
         mirostatTau: Float = 5.0f,
-        mirostatEta: Float = 0.1f
+        mirostatEta: Float = 0.1f,
+        stopSequences: List<String> = emptyList()
     ): Result<String>
     
     fun generateStreamWithImage(
@@ -86,6 +99,7 @@ interface InferenceRepository {
         typicalP: Float = 1.0f,
         mirostat: Int = 0,
         mirostatTau: Float = 5.0f,
-        mirostatEta: Float = 0.1f
+        mirostatEta: Float = 0.1f,
+        stopSequences: List<String> = emptyList()
     ): Flow<GenerationState>
 }

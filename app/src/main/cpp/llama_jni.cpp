@@ -816,6 +816,13 @@ Java_com_quantlm_yaser_data_inference_LlamaEngine_nativeGenerateStream(
     jclass callbackClass = env->GetObjectClass(callback);
     jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)V");
     jmethodID onCompleteMethod = env->GetMethodID(callbackClass, "onComplete", "()V");
+
+    if (env->ExceptionCheck() || onTokenMethod == nullptr || onCompleteMethod == nullptr) {
+        LOGE("Failed to resolve StreamCallback methods (onToken/onComplete); aborting stream safely");
+        env->ExceptionClear();
+        env->DeleteLocalRef(callbackClass);
+        return;
+    }
     
     // Tokenize prompt using common_tokenize
     std::vector<llama_token> tokens_list = common_tokenize(g_ctx, promptStr, true);
@@ -865,14 +872,14 @@ Java_com_quantlm_yaser_data_inference_LlamaEngine_nativeGenerateStream(
         LOGE("Context size: %d, Batch tokens: %d", n_ctx, batch.n_tokens);
         llama_batch_free(batch);
         llama_sampler_free(smpl);
-        
-        // Call error callback
-        jstring errorMsg = safeNewStringUTF(env, "Failed to decode prompt");
-        jclass callbackClass = env->GetObjectClass(callback);
-        // Try to call onComplete to prevent hanging
-        jmethodID onCompleteMethod = env->GetMethodID(callbackClass, "onComplete", "()V");
+
+        // Call completion callback to avoid hanging UI state.
         env->CallVoidMethod(callback, onCompleteMethod);
-        env->DeleteLocalRef(errorMsg);
+        if (env->ExceptionCheck()) {
+            LOGE("Exception in onComplete callback, clearing");
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(callbackClass);
         return;
     }
     LOGI("Initial batch decoded successfully");
@@ -953,6 +960,12 @@ Java_com_quantlm_yaser_data_inference_LlamaEngine_nativeGenerateStream(
 
     // Call completion callback
     env->CallVoidMethod(callback, onCompleteMethod);
+    if (env->ExceptionCheck()) {
+        LOGE("Exception in onComplete callback, clearing");
+        env->ExceptionClear();
+    }
+
+    env->DeleteLocalRef(callbackClass);
     
     LOGI("Streaming complete. Generated %d tokens", n_decode);
 }
@@ -1012,6 +1025,20 @@ Java_com_quantlm_yaser_data_inference_LlamaEngine_nativeGetModelInfo(
     }
     
     return safeNewStringUTF(env, info.c_str());
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_quantlm_yaser_data_inference_LlamaEngine_nativeIsVulkanCompiled(
+        JNIEnv* env,
+        jobject /* this */) {
+    (void)env;
+    const bool gpu_supported = llama_supports_gpu_offload();
+    if (gpu_supported) {
+        LOGI("GPU offload backend is available");
+    } else {
+        LOGW("GPU offload backend is not available; CPU fallback will be used");
+    }
+    return gpu_supported ? JNI_TRUE : JNI_FALSE;
 }
 
 /**
@@ -1427,12 +1454,24 @@ Java_com_quantlm_yaser_data_inference_LlamaEngine_nativeGenerateStreamWithImage(
     jclass callbackClass = env->GetObjectClass(callback);
     jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)V");
     jmethodID onCompleteMethod = env->GetMethodID(callbackClass, "onComplete", "()V");
+
+    if (env->ExceptionCheck() || onTokenMethod == nullptr || onCompleteMethod == nullptr) {
+        LOGE("Failed to resolve StreamCallback methods for vision stream; aborting safely");
+        env->ExceptionClear();
+        env->ReleaseStringUTFChars(imagePath, image_path);
+        env->DeleteLocalRef(callbackClass);
+        return;
+    }
     
     // Load the image
     mtmd_bitmap* bitmap = load_image_from_file(image_path);
     if (!bitmap) {
         env->ReleaseStringUTFChars(imagePath, image_path);
         env->CallVoidMethod(callback, onCompleteMethod);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(callbackClass);
         return;
     }
     
@@ -1455,6 +1494,10 @@ Java_com_quantlm_yaser_data_inference_LlamaEngine_nativeGenerateStreamWithImage(
         mtmd_input_chunks_free(chunks);
         env->ReleaseStringUTFChars(imagePath, image_path);
         env->CallVoidMethod(callback, onCompleteMethod);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(callbackClass);
         return;
     }
     
@@ -1487,6 +1530,10 @@ Java_com_quantlm_yaser_data_inference_LlamaEngine_nativeGenerateStreamWithImage(
         mtmd_input_chunks_free(chunks);
         env->ReleaseStringUTFChars(imagePath, image_path);
         env->CallVoidMethod(callback, onCompleteMethod);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(callbackClass);
         return;
     }
     
@@ -1577,6 +1624,10 @@ Java_com_quantlm_yaser_data_inference_LlamaEngine_nativeGenerateStreamWithImage(
     env->ReleaseStringUTFChars(imagePath, image_path);
     
     env->CallVoidMethod(callback, onCompleteMethod);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+    env->DeleteLocalRef(callbackClass);
     LOGI("Vision streaming complete, generated %d tokens", n_decode);
 }
 

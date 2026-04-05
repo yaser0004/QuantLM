@@ -144,4 +144,15 @@ class ModelManager @Inject constructor(
             null
         }
     }
+
+    fun resolveModelIdForLoadedFileName(loadedFileName: String): String? {
+        val modelId = AvailableModels.getAllModels().find { it.fileName == loadedFileName }?.id
+        if (modelId != null) {
+            return modelId
+        }
+
+        return AvailableModels.getAllModels()
+            .firstOrNull { it.fileName.equals(loadedFileName, ignoreCase = true) }
+            ?.id
+    }
 }

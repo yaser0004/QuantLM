@@ -362,9 +362,10 @@ class SendMessageUseCase @Inject constructor(
      */
     private fun cleanResponse(
         text: String,
-        collapseWhitespace: Boolean
+        collapseWhitespace: Boolean,
+        stopSequences: List<String>
     ): String {
-        var cleaned = text
+        var cleaned = trimAtFirstStopToken(text, stopSequences)
 
         // Fast path: if no control tokens present
         if (!cleaned.contains("<") && !cleaned.contains("###")) {
@@ -407,13 +408,32 @@ class SendMessageUseCase @Inject constructor(
 
         // Defensive fallback: if cleanup removes everything, preserve raw text so
         // we never persist an empty assistant message after successful generation.
-        val fallback = finaliseWhitespace(text, collapseWhitespace)
+        val fallback = finaliseWhitespace(trimAtFirstStopToken(text, stopSequences), collapseWhitespace)
         if (fallback.isNotBlank()) {
             Log.w(TAG, "cleanResponse removed all content; using uncleaned fallback text")
             return fallback
         }
 
         return normalized
+    }
+
+    private fun trimAtFirstStopToken(text: String, stopTokens: List<String>): String {
+        if (stopTokens.isEmpty()) {
+            return text
+        }
+
+        val firstStopIndex = stopTokens
+            .asSequence()
+            .filter { it.isNotBlank() }
+            .map { token -> text.indexOf(token) }
+            .filter { it >= 0 }
+            .minOrNull()
+
+        return if (firstStopIndex != null) {
+            text.substring(0, firstStopIndex)
+        } else {
+            text
+        }
     }
 
     private fun finaliseWhitespace(text: String, collapseWhitespace: Boolean): String {
@@ -446,6 +466,7 @@ class SendMessageUseCase @Inject constructor(
         mirostat: Int,
         mirostatTau: Float,
         mirostatEta: Float,
+        stopSequences: List<String> = emptyList(),
         systemPrompt: String,
         imagePaths: List<String> = emptyList(),
         isRegeneration: Boolean = false
@@ -458,6 +479,8 @@ class SendMessageUseCase @Inject constructor(
         
         // Get model info for stats (fast - just reads cached value)
         val modelName = inferenceRepository.getLoadedModelName() ?: "Unknown"
+        val backendLabel = inferenceRepository.getActiveBackendLabel()
+        val modelFormatLabel = inferenceRepository.getActiveModelFormatLabel()
         
         // Only save user message if not a regeneration
         if (!isRegeneration) {
@@ -497,7 +520,8 @@ class SendMessageUseCase @Inject constructor(
                 typicalP = typicalP,
                 mirostat = mirostat,
                 mirostatTau = mirostatTau,
-                mirostatEta = mirostatEta
+                mirostatEta = mirostatEta,
+                stopSequences = stopSequences
             )
         } else {
             // Text-only path - use conversation history
@@ -517,7 +541,8 @@ class SendMessageUseCase @Inject constructor(
                 typicalP = typicalP,
                 mirostat = mirostat,
                 mirostatTau = mirostatTau,
-                mirostatEta = mirostatEta
+                mirostatEta = mirostatEta,
+                stopSequences = stopSequences
             )
         }
         
@@ -537,7 +562,8 @@ class SendMessageUseCase @Inject constructor(
                     // Clean the final response text only (not during streaming)
                     fullResponse = cleanResponse(
                         text = state.text,
-                        collapseWhitespace = true
+                        collapseWhitespace = true,
+                        stopSequences = stopSequences
                     )
                     
                     // Estimate tokens generated (rough: ~4 chars per token)
@@ -564,7 +590,9 @@ class SendMessageUseCase @Inject constructor(
                         topK = topK,
                         maxTokens = maxTokens,
                         wasVisionRequest = isVisionRequest,
-                        imageCount = imagePaths.size
+                        imageCount = imagePaths.size,
+                        backend = backendLabel,
+                        modelFormat = modelFormatLabel
                     )
                     
                     Log.d(TAG, "=== COMPLETE: ${stats.formatGenerationTime()}, ${stats.formatTokensPerSecond()} ===")

@@ -5,10 +5,20 @@ project("quantlm")
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -flto")
 
 # Find required libraries
 find_library(log-lib log)
 find_library(android-lib android)
+
+# Toggle Vulkan backend support from Gradle/CMake arguments
+option(USE_VULKAN "Enable Vulkan backend support" ON)
+if(USE_VULKAN)
+    find_library(vulkan-lib vulkan)
+    if(NOT vulkan-lib)
+        message(WARNING "USE_VULKAN is ON but Vulkan library was not found; using CPU backend only.")
+    endif()
+endif()
 
 # Add llama.cpp source files
 set(LLAMA_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/llama-cpp)
@@ -114,18 +124,33 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     c++_shared
 )
 
+if(USE_VULKAN AND vulkan-lib)
+    target_link_libraries(${CMAKE_PROJECT_NAME} ${vulkan-lib})
+endif()
+
 # Compiler flags for optimization
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
     -O3
     -ffast-math
     -fno-finite-math-only
     -funroll-loops
+    -flto
 )
 
 # Add preprocessor definitions
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    GGML_USE_CPU=1
     NDEBUG
     GGML_VERSION="0.9.4"
     GGML_COMMIT="unknown"
 )
+
+if(USE_VULKAN AND vulkan-lib)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
+        GGML_VULKAN=1
+        GGML_USE_CPU=1
+    )
+else()
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
+        GGML_USE_CPU=1
+    )
+endif()

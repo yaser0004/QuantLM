@@ -1,54 +1,42 @@
-# Android SDK cache
-.android/
+# Default-deny: only keep app source + Gradle build files in the repo.
+/*
 
-# Android Studio / IDE
-*.iml
-*.ipr
-*.iws
-.idea/
-.vscode/
-captures/
-.navigation/
-vcs.xml
+# Keep repository essentials
+!/.gitignore
+!/README.md
+!/LICENSE
 
-# Gradle / Kotlin caches
-.gradle/
-.configuration-cache/
-.kotlin/
-gradle-app.setting
+# Keep Gradle project files
+!/build.gradle.kts
+!/settings.gradle.kts
+!/gradle.properties
+!/gradlew
+!/gradlew.bat
+!/gradle/
+!/gradle/**
 
-# Build outputs
+# Keep Android app module
+!/app/
+!/app/**
+
+# Exclude local IDE/build caches even inside allowed folders
+/.idea/
+/.vscode/
+/.gradle/
+/.kotlin/
+/.configuration-cache/
+/build/
 **/build/
-bin/
-gen/
-out/
-release/
-obj/
-*.dex
-*.class
-*.apk
-*.ap_
-*.aab
+**/generated/
+**/intermediates/
+**/outputs/
+**/tmp/
+**/.externalNativeBuild/
+**/.cxx/
 
-# CMake and NDK
-.externalNativeBuild/
-.cxx/
-cmake-build-*/
-CMakeCache.txt
-CMakeFiles/
-
-# Native libraries (generated)
-*.so
-*.a
-
-# Profiling
-*.hprof
-
-# Local configuration (environment-specific)
-local.properties
-keystore.properties
-
-# Keystores and signing files
+# Local machine and signing secrets
+/local.properties
+/keystore.properties
 *.jks
 *.keystore
 *.p12
@@ -59,49 +47,25 @@ keystore.properties
 *.csr
 *.crt
 
-# Environment and secret configuration
-.env
-.env.*
-!.env.example
-**/google-services.json
-**/secrets.properties
-**/signing.properties
-**/credentials.properties
-**/*service-account*.json
-**/*firebase-adminsdk*.json
-
-# Logs and temporary files
+# Local logs, crash dumps, and diagnostics
 *.log
 *.tmp
 *.temp
 *.swp
 *.swo
 *.bak
-*.orig
-*.rej
-*.ps1.log
+*~
+*.hprof
 hs_err_pid*.log
 replay_pid*.log
+/build_error.txt
+/build_error_utf8.txt
+/bundle_release.log
+/file_list.txt
+/quantlm_ui.xml
+/release_crash_analysis.md
 
-# OS-specific
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-*~
-
-# Large assets (models too big for git)
+# Large runtime model assets (not required for source builds)
 *.gguf
-*.bin
 *.safetensors
 app/src/main/assets/models/
-
-# Local tools folders
-platform-tools/
-
-# Local build diagnostics
-build_error.txt
-build_error_utf8.txt

@@ -744,7 +744,7 @@ class ChatViewModel @Inject constructor(
             _selectedTemplate.value = null
             
             // Use current settings (template system prompt takes precedence if set)
-            val settings = _generationSettings.value
+            val settings = generationPreferences.getSettings().first()
             
             try {
                 sendMessageUseCase(
@@ -762,6 +762,7 @@ class ChatViewModel @Inject constructor(
                     mirostat = settings.mirostat,
                     mirostatTau = settings.mirostatTau,
                     mirostatEta = settings.mirostatEta,
+                    stopSequences = settings.stopSequences,
                     systemPrompt = templateSystemPrompt ?: settings.systemPrompt,
                     imagePaths = imagePaths
                 ).collect { state ->
@@ -885,7 +886,7 @@ class ChatViewModel @Inject constructor(
         
         viewModelScope.launch {
             val conversationId = _currentConversationId.value ?: return@launch
-            val settings = _generationSettings.value
+            val settings = generationPreferences.getSettings().first()
             AppEventLogger.info(
                 component = TAG,
                 action = "regenerate_started",
@@ -908,6 +909,7 @@ class ChatViewModel @Inject constructor(
                     mirostat = settings.mirostat,
                     mirostatTau = settings.mirostatTau,
                     mirostatEta = settings.mirostatEta,
+                    stopSequences = settings.stopSequences,
                     systemPrompt = settings.systemPrompt,
                     imagePaths = message.imagePaths,
                     isRegeneration = true // Don't create new user message

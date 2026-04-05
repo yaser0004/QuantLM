@@ -213,27 +213,22 @@ class ToolExecutorImpl @Inject constructor(
         )
         
         return try {
-            val intent = Intent(Intent.ACTION_CALL).apply {
-                data = Uri.parse("tel:$number")
+            val dialUri = Uri.fromParts("tel", number, null)
+            val intent = Intent(Intent.ACTION_DIAL).apply {
+                data = dialUri
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(intent)
             ToolResult(
                 toolName = call.name,
                 success = true,
-                result = "Calling $number"
+                result = "Opening dialer for $number"
             )
-        } catch (e: SecurityException) {
-            // Fallback to dial intent (doesn't require permission)
-            val dialIntent = Intent(Intent.ACTION_DIAL).apply {
-                data = Uri.parse("tel:$number")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(dialIntent)
+        } catch (e: Exception) {
             ToolResult(
                 toolName = call.name,
-                success = true,
-                result = "Opening dialer for $number (call permission not granted)"
+                success = false,
+                error = "Failed to open dialer: ${e.message}"
             )
         }
     }

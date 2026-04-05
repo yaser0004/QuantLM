@@ -28,10 +28,14 @@ val hasCompleteSigningConfig = requiredSigningKeys.all {
 val releaseStoreFilePath = signingProp("storeFile")
 val releaseStoreFile = releaseStoreFilePath?.let { file(it) }
 val useReleaseSigning = hasCompleteSigningConfig
+val supportedAbis = listOf("arm64-v8a", "armeabi-v7a")
+val requestedTaskNames = gradle.startParameter.taskNames.map { it.lowercase() }
+val isBundleTaskRequested = requestedTaskNames.any { it.contains("bundle") }
+val enableAbiSplits = !isBundleTaskRequested
 
 android {
     namespace = "com.quantlm.yaser"
-    compileSdk = 34
+    compileSdk = 35
 
     signingConfigs {
         create("release") {
@@ -49,7 +53,7 @@ android {
     defaultConfig {
         applicationId = "com.quantlm.yaser"
         minSdk = 29
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
@@ -60,7 +64,9 @@ android {
 
         // NDK configuration
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            if (!enableAbiSplits) {
+                abiFilters += supportedAbis
+            }
         }
 
         externalNativeBuild {
@@ -68,7 +74,8 @@ android {
                 cppFlags += "-std=c++17"
                 arguments += listOf(
                     "-DANDROID_STL=c++_shared",
-                    "-DANDROID_PLATFORM=android-29"
+                    "-DANDROID_PLATFORM=android-29",
+                    "-DUSE_VULKAN=ON"
                 )
             }
         }
@@ -80,6 +87,7 @@ android {
                 signingConfig = signingConfigs.getByName("release")
             }
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -103,6 +111,15 @@ android {
         compose = true
     }
 
+    splits {
+        abi {
+            isEnable = enableAbiSplits
+            reset()
+            include(*supportedAbis.toTypedArray())
+            isUniversalApk = false
+        }
+    }
+
     sourceSets {
         getByName("main") {
             java {
@@ -116,6 +133,9 @@ android {
     }
 
     packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
@@ -186,10 +206,10 @@ dependencies {
 
     // AI & ML (MediaPipe & TensorFlow Lite)
     implementation("com.google.mediapipe:tasks-genai:0.10.32")
-    implementation("com.google.mediapipe:tasks-vision:0.20230731")
+    // Required by tasks-genai AutoValue-generated models; kept explicit so tasks-vision can remain removed.
+    implementation("com.google.auto.value:auto-value-annotations:1.11.0")
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

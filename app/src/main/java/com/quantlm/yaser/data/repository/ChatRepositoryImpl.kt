@@ -168,7 +168,9 @@ class ChatRepositoryImpl @Inject constructor(
                 topK = generationTopK,
                 maxTokens = generationMaxTokens,
                 wasVisionRequest = wasVisionRequest,
-                imageCount = imageCountForStats
+                imageCount = imageCountForStats,
+                backend = generationBackend ?: "",
+                modelFormat = generationModelFormat ?: ""
             )
         } else null
         
@@ -211,7 +213,9 @@ class ChatRepositoryImpl @Inject constructor(
             generationTopK = generationStats?.topK ?: 0,
             generationMaxTokens = generationStats?.maxTokens ?: 0,
             wasVisionRequest = generationStats?.wasVisionRequest ?: false,
-            generationImageCount = generationStats?.imageCount ?: 0
+            generationImageCount = generationStats?.imageCount ?: 0,
+            generationBackend = generationStats?.backend,
+            generationModelFormat = generationStats?.modelFormat
         )
     }
     

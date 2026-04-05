@@ -21,8 +21,6 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     
     <!-- Tool calling permissions -->
-    <uses-permission android:name="android.permission.CALL_PHONE" />
-    <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <uses-permission android:name="android.permission.READ_CALENDAR" />
@@ -50,7 +48,6 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.QuantLM"
-        android:requestLegacyExternalStorage="true"
         tools:targetApi="31">
         
         <!-- LiteRT-LM GPU acceleration: Required native libraries for GPU backend -->

@@ -196,7 +196,7 @@ object MobileTools {
     
     val MAKE_CALL = Tool(
         name = "make_call",
-        description = "Make a phone call to a contact or number",
+        description = "Open the dialer with a phone number",
         parameters = listOf(
             ToolParameter(
                 name = "number",
@@ -204,8 +204,7 @@ object MobileTools {
                 type = ToolParameterType.STRING
             )
         ),
-        category = ToolCategory.COMMUNICATION,
-        requiresPermission = "android.permission.CALL_PHONE"
+        category = ToolCategory.COMMUNICATION
     )
     
     val SEND_SMS = Tool(
@@ -223,8 +222,7 @@ object MobileTools {
                 type = ToolParameterType.STRING
             )
         ),
-        category = ToolCategory.COMMUNICATION,
-        requiresPermission = "android.permission.SEND_SMS"
+        category = ToolCategory.COMMUNICATION
     )
     
     val COMPOSE_EMAIL = Tool(
