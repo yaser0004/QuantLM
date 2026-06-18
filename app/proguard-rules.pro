@@ -1,70 +1,42 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
-
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
-
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
--keepattributes SourceFile,LineNumberTable,*Annotation*
-
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
-
-# Keep native methods
--keepclasseswithmembernames class * {
-    native <methods>;
-}
-
-# Keep Room entities
--keep class * extends androidx.room.RoomDatabase
--keep @androidx.room.Entity class *
--dontwarn androidx.room.paging.**
-
-# Keep Hilt generated classes
--keep class dagger.hilt.** { *; }
--keep class javax.inject.** { *; }
--keep class androidx.hilt.** { *; }
-
-# Keep Hilt ViewModels annotated with @HiltViewModel.
--keep @dagger.hilt.android.lifecycle.HiltViewModel class * extends androidx.lifecycle.ViewModel { *; }
-
-# Keep custom engine qualifier annotations used in DI wiring.
--keep @interface com.quantlm.yaser.di.LlamaEngineQualifier
--keep @interface com.quantlm.yaser.di.LiteRTEngineQualifier
--keep @interface com.quantlm.yaser.di.TFLiteEngineQualifier
-
-# Keep generated Dagger/Hilt classes used at runtime.
--keep class **_HiltModules { *; }
--keep class **_HiltModules$* { *; }
--keep class **_Factory { *; }
--keep class **_MembersInjector { *; }
-
-# JNI bridge in llama_jni.cpp resolves these callback methods by name using GetMethodID.
-# Keep interface + implementation member names to avoid release-only NoSuchMethodError.
--keep class com.quantlm.yaser.data.inference.LlamaEngine$StreamCallback { *; }
--keepclassmembers class * implements com.quantlm.yaser.data.inference.LlamaEngine$StreamCallback {
-    public void onToken(java.lang.String);
-    public void onComplete();
-    public void onError(java.lang.String);
-}
-
-# Suppress optional/compile-only references reported by R8 for release minification.
--dontwarn javax.lang.model.SourceVersion
--dontwarn javax.lang.model.element.Element
--dontwarn javax.lang.model.element.ElementKind
--dontwarn javax.lang.model.element.Modifier
--dontwarn javax.lang.model.type.TypeMirror
--dontwarn javax.lang.model.type.TypeVisitor
--dontwarn javax.lang.model.util.SimpleTypeVisitor8
+# TensorFlow Lite GPU Delegate - suppress warnings for missing optional classes
 -dontwarn org.tensorflow.lite.gpu.GpuDelegateFactory$Options$GpuBackend
 -dontwarn org.tensorflow.lite.gpu.GpuDelegateFactory$Options
+-keep class org.tensorflow.lite.gpu.GpuDelegate { *; }
+-keep class org.tensorflow.lite.gpu.GpuDelegateFactory { *; }
+
+# TensorFlow Lite Core
+-keep class org.tensorflow.lite.Interpreter { *; }
+-keep class org.tensorflow.lite.Tensor { *; }
+-keep class org.tensorflow.lite.** { *; }
+
+# LiteRT-LM — the native JNI layer (liblitertlm_jni.so) looks up Java classes and
+# methods by their original names at runtime via GetMethodID / GetFieldID. R8 renaming
+# these produces mid == null in nativeCreateConversation / nativeSendMessage, which
+# triggers an ART JNI abort (SIGABRT). Keep all public API and internal callback classes.
+-keep class com.google.ai.edge.litertlm.** { *; }
+-keep class com.google.ai.edge.litert.** { *; }
+
+# MediaPipe - suppress warnings for missing optional image classes
+-dontwarn com.google.mediapipe.framework.image.BitmapExtractor
+-dontwarn com.google.mediapipe.framework.image.ByteBufferExtractor
+-dontwarn com.google.mediapipe.framework.image.MPImage
+-dontwarn com.google.mediapipe.framework.image.MPImageProperties
+-dontwarn com.google.mediapipe.framework.image.MediaImageExtractor
+-dontwarn com.google.mediapipe.proto.CalculatorProfileProto$CalculatorProfile
+-dontwarn com.google.mediapipe.proto.GraphTemplateProto$CalculatorGraphTemplate
+-keep class com.google.mediapipe.** { *; }
+
+# Hilt Dependency Injection
+-keep class * extends dagger.hilt.internal.Binding
+-keep interface dagger.hilt.internal.Binding
+
+# Jsoup — used by the Web Search feature to parse DuckDuckGo results and scraped
+# pages. Jsoup ships optional integrations against absent classes; suppress them.
+-keep class org.jsoup.** { *; }
+-dontwarn org.jsoup.**
+
+# Gson — keep @SerializedName-annotated fields used for persisted web-source JSON.
+-keepclassmembers class * {
+    @com.google.gson.annotations.SerializedName <fields>;
+}
+-keep class com.quantlm.yaser.domain.model.WebSourceRef { *; }

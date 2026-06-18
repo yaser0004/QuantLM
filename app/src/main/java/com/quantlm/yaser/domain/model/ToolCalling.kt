@@ -424,6 +424,66 @@ object MobileTools {
         category = ToolCategory.SYSTEM
     )
     
+    // ========== AGENT SKILLS TOOLS (§3.9) ==========
+
+    val LOAD_SKILL = Tool(
+        name = "load_skill",
+        description = "Return the instructions body of a registered agent skill by name.",
+        parameters = listOf(
+            ToolParameter(
+                name = "name",
+                description = "Skill name (matches the skill listed in the system prompt)",
+                type = ToolParameterType.STRING,
+            ),
+        ),
+        category = ToolCategory.CUSTOM,
+    )
+
+    val RUN_JS = Tool(
+        name = "run_js",
+        description = "Execute a JS skill's script in a hidden WebView and return its result.",
+        parameters = listOf(
+            ToolParameter(
+                name = "skill_name",
+                description = "Skill name",
+                type = ToolParameterType.STRING,
+            ),
+            ToolParameter(
+                name = "script_name",
+                description = "Script entry (defaults to index.html)",
+                type = ToolParameterType.STRING,
+                required = false,
+            ),
+            ToolParameter(
+                name = "data",
+                description = "JSON-stringifiable arguments passed to the skill",
+                type = ToolParameterType.STRING,
+                required = false,
+            ),
+        ),
+        category = ToolCategory.CUSTOM,
+    )
+
+    val RUN_INTENT = Tool(
+        name = "run_intent",
+        description = "Trigger a whitelisted Android intent (send_email, send_sms, open_url, open_map, make_call).",
+        parameters = listOf(
+            ToolParameter(
+                name = "intent",
+                description = "Intent name",
+                type = ToolParameterType.STRING,
+                enumValues = listOf("send_email", "send_sms", "open_url", "open_map", "make_call"),
+            ),
+            ToolParameter(
+                name = "parameters",
+                description = "JSON-stringifiable parameter bag",
+                type = ToolParameterType.STRING,
+                required = false,
+            ),
+        ),
+        category = ToolCategory.CUSTOM,
+    )
+
     val GET_WEATHER = Tool(
         name = "get_weather",
         description = "Get current weather information",
@@ -453,7 +513,9 @@ object MobileTools {
         // Media
         PLAY_MUSIC, TAKE_PHOTO,
         // System
-        SET_TIMER, OPEN_APP, GET_WEATHER
+        SET_TIMER, OPEN_APP, GET_WEATHER,
+        // Agent skills (§3.9)
+        LOAD_SKILL, RUN_JS, RUN_INTENT
     )
     
     /**
@@ -507,10 +569,26 @@ object ToolCallParser {
     )
     
     /**
+     * Phase 2 (§3.9): strip ```json``` (or ```) fences and trailing commas from
+     * the JSON object body so smaller open models that emit noisy output still
+     * parse. We don't attempt full JSON recovery — the regex below is
+     * tolerant of whitespace/newlines via [RegexOption.DOT_MATCHES_ALL].
+     */
+    private fun normalizeToolCallBody(text: String): String {
+        var t = text
+        // Strip ```json ... ``` and ``` ... ``` fences without losing the body.
+        t = Regex("```(?:json)?\\s*", RegexOption.IGNORE_CASE).replace(t, "")
+        t = t.replace("```", "")
+        // Tolerate a single trailing comma before `}` or `]` (smaller models do this often).
+        t = Regex(",\\s*([}\\]])").replace(t, "$1")
+        return t
+    }
+
+    /**
      * Parse a tool call from LLM output
      */
     fun parseToolCall(text: String): ToolCall? {
-        val match = toolCallRegex.find(text) ?: return null
+        val match = toolCallRegex.find(normalizeToolCallBody(text)) ?: return null
         
         try {
             val toolName = match.groupValues[1]
@@ -549,14 +627,14 @@ object ToolCallParser {
      * Check if text contains a tool call
      */
     fun containsToolCall(text: String): Boolean {
-        return toolCallRegex.containsMatchIn(text)
+        return toolCallRegex.containsMatchIn(normalizeToolCallBody(text))
     }
-    
+
     /**
      * Extract the text before a tool call (for display)
      */
     fun extractTextBeforeToolCall(text: String): String {
-        val match = toolCallRegex.find(text) ?: return text
+        val match = toolCallRegex.find(normalizeToolCallBody(text)) ?: return text
         return text.substring(0, match.range.first).trim()
     }
 }

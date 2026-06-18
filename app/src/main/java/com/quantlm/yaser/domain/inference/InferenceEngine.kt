@@ -1,6 +1,8 @@
 package com.quantlm.yaser.domain.inference
 
 import com.quantlm.yaser.data.inference.LlamaEngine.StreamCallback
+import com.quantlm.yaser.data.local.GenerationPreferences.HardwareAccelerationMode
+import com.quantlm.yaser.domain.model.ModelCapability
 import com.quantlm.yaser.domain.model.ModelFormat
 import kotlinx.coroutines.flow.Flow
 
@@ -11,9 +13,8 @@ import kotlinx.coroutines.flow.Flow
  * 
  * Current implementations:
  * - LlamaEngine (GGUF format via llama.cpp)
- * 
- * Planned implementations:
- * - TFLiteEngine (TFLite format via TensorFlow Lite runtime)
+ * - MediaPipeEngine (.task / .litertlm via MediaPipe GenAI)
+ * - LiteRTEngine (.litertlm via native LiteRT-LM)
  */
 interface InferenceEngine {
     
@@ -36,10 +37,18 @@ interface InferenceEngine {
      * Whether this engine supports vision/multimodal capabilities
      */
     val supportsVision: Boolean
+
+    /**
+     * The sampling parameters this engine actually honors. The Settings UI
+     * uses this to disable controls the active engine would silently ignore.
+     * Defaults to the full surface; SDK-backed engines override with a subset.
+     */
+    val samplingCapabilities: Set<SamplingParam>
+        get() = SamplingCapabilities.FULL
     
     /**
      * Load a model from the given path
-     * 
+     *
      * @param modelPath Path to the model file
      * @param config Configuration options for loading
      * @return Result indicating success or failure
@@ -48,6 +57,37 @@ interface InferenceEngine {
         modelPath: String,
         config: InferenceConfig = InferenceConfig()
     ): Result<Unit>
+
+    /**
+     * Phase 1: load with capability-aware options.
+     *
+     * The default implementation delegates to the simple [loadModel] overload and
+     * ignores [options]; concrete engines override to honor accelerator selection,
+     * thinking, and speculative-decoding init flags. Keeping a default keeps source
+     * compat for any engine that hasn't been updated yet.
+     */
+    suspend fun loadModel(
+        modelPath: String,
+        config: InferenceConfig,
+        options: LoadOptions,
+    ): Result<Unit> = loadModel(modelPath, config)
+
+    /**
+     * Phase 1: capabilities the engine can actually run for the currently loaded
+     * model. Returned set is intersected with the manifest entry's declared
+     * capabilities by the repository layer before being surfaced to the UI.
+     *
+     * Engines that have no model loaded should return [emptySet].
+     */
+    fun getRuntimeCapabilities(): Set<ModelCapability> = emptySet()
+
+    /**
+     * Phase 1: reset any conversation-scoped state (KV cache, MediaPipe session,
+     * etc.) without unloading the model. Called when the user starts a new
+     * conversation or edits/regenerates a turn. Default no-op for engines that
+     * don't carry conversation state.
+     */
+    suspend fun resetConversation() = Unit
     
     /**
      * Load a vision-capable model with multimodal projector
@@ -145,6 +185,24 @@ data class InferenceConfig(
 )
 
 /**
+ * Phase 1: capability-aware load options.
+ *
+ * - [accelerationMode] is honored by both engines. MediaPipe historically ignored
+ *   it; engines that can't actually steer their backend should reflect this in
+ *   the active backend label so the UI doesn't lie.
+ * - [enableThinking] gates the chat-template `enable_thinking` flag (llama.cpp
+ *   `common_chat_templates_inputs.enable_thinking`).
+ * - [enableSpeculativeDecoding] is metadata-only in Phase 1 (no GGUF runtime
+ *   path yet; see prompts/QuantLM_Phase1_Opus.md §1.4). Engines that don't
+ *   implement it should silently ignore.
+ */
+data class LoadOptions(
+    val accelerationMode: HardwareAccelerationMode = HardwareAccelerationMode.GPU,
+    val enableThinking: Boolean = false,
+    val enableSpeculativeDecoding: Boolean = false,
+)
+
+/**
  * Parameters for text generation
  */
 data class GenerationParams(
@@ -160,7 +218,9 @@ data class GenerationParams(
     val mirostat: Int = 0,
     val mirostatTau: Float = 5.0f,
     val mirostatEta: Float = 0.1f,
-    val stopSequences: List<String> = emptyList()
+    val stopSequences: List<String> = emptyList(),
+    /** Gates the LiteRT-LM `enable_thinking` extra-context flag. */
+    val enableThinking: Boolean = false
 )
 
 /**

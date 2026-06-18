@@ -14,7 +14,7 @@ import com.quantlm.yaser.data.local.entity.MessageEntity
         ConversationEntity::class,
         MessageEntity::class
     ],
-    version = 6,
+    version = 10,
     exportSchema = false
 )
 abstract class ChatDatabase : RoomDatabase() {
@@ -74,6 +74,40 @@ abstract class ChatDatabase : RoomDatabase() {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.execSQL("ALTER TABLE messages ADD COLUMN generationBackend TEXT")
                 database.execSQL("ALTER TABLE messages ADD COLUMN generationModelFormat TEXT")
+            }
+        }
+
+        // Phase 2 (§3.6 / §3.8): add nullable columns for thinking content
+        // (reasoning stream parse) and audio attachment paths. Existing rows
+        // default to NULL — fully additive, no destructive migration.
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE messages ADD COLUMN thinkingContent TEXT")
+                database.execSQL("ALTER TABLE messages ADD COLUMN audioPaths TEXT")
+            }
+        }
+
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE messages ADD COLUMN thoughtSummary TEXT")
+            }
+        }
+
+        // Web Search: nullable column holding the JSON list of sources used to
+        // ground an answer. Existing rows default to NULL — fully additive.
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE messages ADD COLUMN webSources TEXT")
+            }
+        }
+
+        // Model-switch markers: two columns that track when the user changed
+        // models mid-conversation. Fully additive — existing rows default to
+        // 0 / NULL so no data is affected.
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE messages ADD COLUMN isModelChangeMarker INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE messages ADD COLUMN markerModelName TEXT")
             }
         }
     }

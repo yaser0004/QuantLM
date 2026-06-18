@@ -3,7 +3,9 @@ package com.quantlm.yaser.data.inference
 import android.content.Context
 import android.util.Log
 import com.quantlm.yaser.domain.model.AvailableModels
+import com.quantlm.yaser.domain.model.ModelCapability
 import com.quantlm.yaser.domain.model.ModelInfo
+import com.quantlm.yaser.domain.model.isVisionModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -95,6 +97,21 @@ class ModelManager @Inject constructor(
                 // Vision is incomplete if model supports vision but mmproj is missing
                 val isVisionIncomplete = isVisionCapable && !hasRequiredVisionAssets
 
+                // Phase 1: project manifest capabilities onto runtime info. VISION
+                // moves into [incompleteCapabilities] if the mmproj is missing so the
+                // UI can show "complete download to enable" without re-querying the
+                // manifest.
+                val manifestCapabilities = downloadableModel?.capabilities ?: emptySet()
+                val runtimeCapabilities: Set<ModelCapability>
+                val incompleteCapabilities: Set<ModelCapability>
+                if (isVisionIncomplete) {
+                    runtimeCapabilities = manifestCapabilities - ModelCapability.VISION
+                    incompleteCapabilities = setOf(ModelCapability.VISION)
+                } else {
+                    runtimeCapabilities = manifestCapabilities
+                    incompleteCapabilities = emptySet()
+                }
+
                 val result = ModelInfo(
                     name = file.nameWithoutExtension,
                     filePath = file.absolutePath,
@@ -102,7 +119,9 @@ class ModelManager @Inject constructor(
                     isLoaded = false,
                     isVisionModel = hasRequiredVisionAssets,
                     mmprojPath = mmprojPath,
-                    isVisionIncomplete = isVisionIncomplete
+                    isVisionIncomplete = isVisionIncomplete,
+                    capabilities = runtimeCapabilities,
+                    incompleteCapabilities = incompleteCapabilities,
                 )
                 Log.i(TAG, "Detected local model: ${result.name}, size: ${result.size}, isVision=${result.isVisionModel}, isVisionIncomplete=${result.isVisionIncomplete}")
                 result

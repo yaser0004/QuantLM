@@ -57,9 +57,106 @@ object SystemLogDiagnostics {
             "Package: $pkg  •  App version: $ver",
             "Device: ${Build.MANUFACTURER} ${Build.MODEL}  •  Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
             "VM heap (approx): ${usedMb}MB used / ${maxMb}MB max",
+            "Cores: ${Runtime.getRuntime().availableProcessors()} (availableProcessors)",
             "App event log file: ${AppEventLogger.getLogFilePath(context) ?: "not initialized"}",
+            "Perf snapshot log file: ${PerformanceSnapshotLogger.getLogFilePath(context) ?: "not initialized"}",
             "── Diagnostics log stream (app events + filtered logcat) ──"
         )
+    }
+
+    /**
+     * Append the most recent performance-snapshot lines (RSS, MemAvailable,
+     * thermal, page faults) to a diagnostics export. Returns an empty list
+     * when no sampling has run yet — that's the steady-state condition
+     * outside of model loads / generations.
+     */
+    fun readPerfSnapshots(context: Context? = null, maxLines: Int = 600): List<String> {
+        val lines = PerformanceSnapshotLogger.readRecentLines(maxLines = maxLines, context = context)
+        return if (lines.isEmpty()) {
+            emptyList()
+        } else {
+            buildList {
+                add("── Performance snapshots (sampled during load/inference) ──")
+                addAll(lines)
+            }
+        }
+    }
+
+    /**
+     * Build a self-contained Markdown bundle that includes the full retained
+     * app-event buffer, the full perf-snapshot buffer, and the recent filtered
+     * logcat, plus the device/app header. Designed to be saved to disk and
+     * pasted into a bug report — opens cleanly in any Markdown viewer.
+     *
+     * Reuses [buildHeaderLines] and [readFilteredLogcat] so the on-disk file
+     * and the in-app share always agree.
+     */
+    fun buildMarkdownBundle(context: Context, exportNumber: Int): String {
+        val pm = context.packageManager
+        val pkg = context.packageName
+        val ver = runCatching { pm.getPackageInfo(pkg, 0) }.getOrNull()
+            ?.let { "${it.versionName} (${it.longVersionCode})" }
+            ?: "unknown"
+        val rt = Runtime.getRuntime()
+        val usedMb = max(0L, (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024))
+        val maxMb = max(0L, rt.maxMemory() / (1024 * 1024))
+        val timestamp = java.text.SimpleDateFormat(
+            "yyyy-MM-dd HH:mm:ss",
+            java.util.Locale.US
+        ).format(java.util.Date())
+
+        val appEvents = AppEventLogger.readRecentLines(maxLines = Int.MAX_VALUE, context = context)
+        val perfSnaps = PerformanceSnapshotLogger.readRecentLines(maxLines = Int.MAX_VALUE, context = context)
+        val (logcatLines, _) = readFilteredLogcat(context)
+
+        return buildString {
+            append("# QuantLM Log #").append(exportNumber).append('\n')
+            append('\n')
+            append("**Saved:** ").append(timestamp).append("  \n")
+            append("**Device:** ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+                .append(" — Android ").append(Build.VERSION.RELEASE)
+                .append(" (API ").append(Build.VERSION.SDK_INT).append(")  \n")
+            append("**App:** QuantLM ").append(ver).append("  \n")
+            append("**JVM heap:** ").append(usedMb).append(" MB used / ").append(maxMb).append(" MB max  \n")
+            append("**Cores:** ").append(Runtime.getRuntime().availableProcessors()).append("  \n")
+            append("**App event log file:** `")
+                .append(AppEventLogger.getLogFilePath(context) ?: "not initialized")
+                .append("`  \n")
+            append("**Perf snapshot log file:** `")
+                .append(PerformanceSnapshotLogger.getLogFilePath(context) ?: "not initialized")
+                .append("`\n")
+            append("\n---\n\n")
+
+            append("## App events (full retained buffer — ")
+                .append(appEvents.size).append(" lines)\n\n")
+            append("```\n")
+            if (appEvents.isEmpty()) {
+                append("(empty — logger has not written anything yet)\n")
+            } else {
+                appEvents.forEach { append(it).append('\n') }
+            }
+            append("```\n\n")
+
+            append("## Performance snapshots (load / inference only — ")
+                .append(perfSnaps.size).append(" lines)\n\n")
+            append("```\n")
+            if (perfSnaps.isEmpty()) {
+                append("(empty — no model load or generation has happened in this session)\n")
+            } else {
+                perfSnaps.forEach { append(it).append('\n') }
+            }
+            append("```\n\n")
+
+            append("## Recent logcat (filtered to QuantLM PID — ")
+                .append(logcatLines.size).append(" lines)\n\n")
+            append("```\n")
+            if (logcatLines.isEmpty()) {
+                append("(empty — logcat read returned nothing)\n")
+            } else {
+                logcatLines.forEach { append(it).append('\n') }
+            }
+            append("```\n")
+        }
     }
 
     fun readFilteredLogcat(context: Context? = null): Pair<List<String>, String?> {
@@ -94,10 +191,17 @@ object SystemLogDiagnostics {
                 }.takeLast(LOGCAT_LINE_CAP)
             }
 
+            val perfLines = PerformanceSnapshotLogger.readRecentLines(maxLines = 400, context = context)
+
             val combined = buildList {
                 if (appEventLines.isNotEmpty()) {
                     add("── App events (persistent, recent) ──")
                     addAll(appEventLines)
+                    add("")
+                }
+                if (perfLines.isNotEmpty()) {
+                    add("── Performance snapshots (load/inference only) ──")
+                    addAll(perfLines)
                     add("")
                 }
                 add("── Logcat (filtered) ──")

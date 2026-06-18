@@ -35,10 +35,13 @@ import com.quantlm.yaser.data.worker.DownloadWorkerConstants.TAG_MODEL_NAME_PREF
 import com.quantlm.yaser.domain.model.DownloadState
 import com.quantlm.yaser.domain.model.DownloadableModel
 import com.quantlm.yaser.domain.model.ExtraDataFile
+import com.quantlm.yaser.domain.model.isVisionModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.Executors
 import javax.inject.Inject
@@ -88,9 +91,10 @@ class WorkManagerDownloadRepository @Inject constructor(
     
     // Map of model ID to worker UUID for tracking
     private val activeWorkerIds = mutableMapOf<String, UUID>()
-    
-    // Track observers to avoid memory leaks
-    private val activeObservers = mutableMapOf<String, Observer<WorkInfo>>()
+
+    // Forever-observers and the LiveData they watch, so cleanup() can actually
+    // detach them (observeForever holds them until explicitly removed).
+    private val activeObservers = mutableMapOf<String, Pair<LiveData<WorkInfo>, Observer<WorkInfo>>>()
     
     /**
      * Get download state as StateFlow for a model
@@ -123,8 +127,12 @@ class WorkManagerDownloadRepository @Inject constructor(
     /**
      * Start downloading a model using WorkManager.
      * Uses KEEP policy to prevent duplicate work and restarts.
+     *
+     * Suspend: the stale-work cleanup queries WorkManager with a blocking
+     * future, which must run on IO — and it must complete BEFORE the enqueue,
+     * otherwise KEEP silently ignores re-download requests.
      */
-    fun downloadModel(
+    suspend fun downloadModel(
         model: DownloadableModel,
         accessToken: String? = null,
         onStatusUpdated: ((WorkManagerDownloadStatus) -> Unit)? = null
@@ -249,7 +257,7 @@ class WorkManagerDownloadRepository @Inject constructor(
      * Retry a stuck or failed download.
      * Cancels existing work, cleans up temp files, and re-enqueues with REPLACE.
      */
-    fun retryDownload(
+    suspend fun retryDownload(
         model: DownloadableModel,
         accessToken: String? = null,
         onStatusUpdated: ((WorkManagerDownloadStatus) -> Unit)? = null
@@ -272,9 +280,12 @@ class WorkManagerDownloadRepository @Inject constructor(
      * Prevents KEEP policy from silently ignoring re-download requests
      * after a previous download failed, succeeded, or was cancelled.
      */
-    private fun cleanupStaleWork(modelId: String) {
+    private suspend fun cleanupStaleWork(modelId: String) {
         try {
-            val workInfos = workManager.getWorkInfosForUniqueWork(modelId).get()
+            // ListenableFuture.get() blocks; keep it off the caller's thread.
+            val workInfos = withContext(Dispatchers.IO) {
+                workManager.getWorkInfosForUniqueWork(modelId).get()
+            }
             for (workInfo in workInfos) {
                 if (workInfo.state.isFinished) {
                     Log.d(TAG, "Cleaning up stale work for $modelId (state: ${workInfo.state})")
@@ -293,11 +304,13 @@ class WorkManagerDownloadRepository @Inject constructor(
      * Checks all persisted active downloads and removes entries
      * for work that is no longer running.
      */
-    fun cleanupStaleDownloads() {
+    suspend fun cleanupStaleDownloads() {
         val activeIds = prefs.getStringSet(KEY_ACTIVE_DOWNLOADS, emptySet()) ?: return
         for (modelId in activeIds.toSet()) {
             try {
-                val workInfos = workManager.getWorkInfosForUniqueWork(modelId).get()
+                val workInfos = withContext(Dispatchers.IO) {
+                    workManager.getWorkInfosForUniqueWork(modelId).get()
+                }
                 val isStillActive = workInfos.any { !it.state.isFinished }
                 if (!isStillActive) {
                     Log.d(TAG, "Removing stale download entry: $modelId")
@@ -322,6 +335,9 @@ class WorkManagerDownloadRepository @Inject constructor(
             )
         downloadStates.clear()
         activeWorkerIds.clear()
+        activeObservers.values.forEach { (liveData, observer) ->
+            mainHandler.post { liveData.removeObserver(observer) }
+        }
         activeObservers.clear()
         prefs.edit().remove(KEY_ACTIVE_DOWNLOADS).apply()
         Log.d(TAG, "Cancelled all downloads")
@@ -364,7 +380,10 @@ class WorkManagerDownloadRepository @Inject constructor(
     private fun cleanup(modelId: String) {
         downloadStates.remove(modelId)
         activeWorkerIds.remove(modelId)
-        activeObservers.remove(modelId)
+        activeObservers.remove(modelId)?.let { (liveData, observer) ->
+            // Detach on the main thread — observeForever was registered there.
+            mainHandler.post { liveData.removeObserver(observer) }
+        }
         persistActiveDownloads()
     }
     
@@ -480,8 +499,8 @@ class WorkManagerDownloadRepository @Inject constructor(
         }
         
         // Store observer for cleanup
-        activeObservers[model.id] = observer
-        
+        activeObservers[model.id] = liveData to observer
+
         // Observe on main thread
         mainHandler.post {
             liveData.observeForever(observer)

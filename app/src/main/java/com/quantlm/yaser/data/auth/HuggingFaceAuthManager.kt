@@ -25,40 +25,72 @@ private const val HF_API_URL = "https://huggingface.co/api/whoami-v2"
 class HuggingFaceAuthManager @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
-    private val masterKey = MasterKey.Builder(context)
-        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-        .build()
-    
-    private val encryptedPrefs = EncryptedSharedPreferences.create(
-        context,
-        PREFS_NAME,
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
-    
+    /**
+     * Lazy + self-healing: EncryptedSharedPreferences.create touches the
+     * Android Keystore and the prefs file, and it THROWS when the ciphertext
+     * no longer matches the keystore key — the classic case being an
+     * auto-backup restored onto a new device (the prefs file travels, the
+     * keystore key does not). Eager creation in the constructor turned that
+     * into a crash at injection time; here it degrades to a one-time token
+     * reset instead.
+     */
+    private val encryptedPrefs: android.content.SharedPreferences? by lazy { createPrefs() }
+
+    private fun createPrefs(): android.content.SharedPreferences? {
+        return try {
+            buildPrefs()
+        } catch (e: Exception) {
+            Log.w(TAG, "Encrypted prefs unreadable (likely restored from backup); resetting", e)
+            try {
+                context.deleteSharedPreferences(PREFS_NAME)
+                buildPrefs()
+            } catch (e2: Exception) {
+                Log.e(TAG, "Could not recreate encrypted prefs; token storage disabled", e2)
+                null
+            }
+        }
+    }
+
+    private fun buildPrefs(): android.content.SharedPreferences {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        return EncryptedSharedPreferences.create(
+            context,
+            PREFS_NAME,
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
+
     private val httpClient = OkHttpClient.Builder().build()
-    
+
     /**
      * Save access token securely
      */
     fun saveToken(token: String) {
-        encryptedPrefs.edit().putString(KEY_ACCESS_TOKEN, token).apply()
+        encryptedPrefs?.edit()?.putString(KEY_ACCESS_TOKEN, token)?.apply()
         Log.d(TAG, "Access token saved")
     }
-    
+
     /**
      * Get saved access token
      */
     fun getToken(): String? {
-        return encryptedPrefs.getString(KEY_ACCESS_TOKEN, null)
+        return try {
+            encryptedPrefs?.getString(KEY_ACCESS_TOKEN, null)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not read access token", e)
+            null
+        }
     }
-    
+
     /**
      * Clear saved access token
      */
     fun clearToken() {
-        encryptedPrefs.edit().remove(KEY_ACCESS_TOKEN).apply()
+        encryptedPrefs?.edit()?.remove(KEY_ACCESS_TOKEN)?.apply()
         Log.d(TAG, "Access token cleared")
     }
     

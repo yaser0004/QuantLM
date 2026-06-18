@@ -2,12 +2,16 @@ package com.quantlm.yaser.presentation.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import com.quantlm.yaser.data.inference.ModelManager
 import com.quantlm.yaser.data.local.GenerationPreferences
 import com.quantlm.yaser.domain.model.ModelConfig
 import com.quantlm.yaser.domain.model.ModelLoadingState
+import com.quantlm.yaser.domain.inference.SamplingCapabilities
+import com.quantlm.yaser.domain.inference.SamplingParam
 import com.quantlm.yaser.domain.model.ModelProfileRegistry
 import com.quantlm.yaser.domain.repository.ChatRepository
+import com.quantlm.yaser.domain.repository.InferenceRepository
 import com.quantlm.yaser.domain.repository.ModelRepository
 import com.quantlm.yaser.domain.tts.TtsVoiceProfile
 import com.quantlm.yaser.domain.usecase.LoadModelUseCase
@@ -25,13 +29,26 @@ class SettingsViewModel @Inject constructor(
     private val chatRepository: ChatRepository,
     private val loadModelUseCase: LoadModelUseCase,
     private val generationPreferences: GenerationPreferences,
-    private val modelManager: ModelManager
+    private val modelManager: ModelManager,
+    private val inferenceRepository: InferenceRepository
 ) : ViewModel() {
+
+    private companion object {
+        const val TAG = "SettingsViewModel"
+    }
 
     private val detectedCpuThreads = detectCpuThreads()
     
     val loadedModel = modelRepository.getLoadedModel()
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
+
+    /**
+     * Sampling parameters the active engine honors — recomputed whenever the
+     * loaded model changes. Drives control enablement in the Settings UI.
+     */
+    val samplingCapabilities: StateFlow<Set<SamplingParam>> = loadedModel
+        .map { inferenceRepository.getActiveSamplingCapabilities() }
+        .stateIn(viewModelScope, SharingStarted.Lazily, SamplingCapabilities.FULL)
     
     /** Loading state exposed from the repository for UI indicators */
     val modelLoadingState: StateFlow<ModelLoadingState> = modelRepository.loadingState
@@ -94,7 +111,10 @@ class SettingsViewModel @Inject constructor(
 
     private val _hardwareAccelerationMode = MutableStateFlow(GenerationPreferences.HardwareAccelerationMode.GPU)
     val hardwareAccelerationMode = _hardwareAccelerationMode.asStateFlow()
-    
+
+    private val _gemma4GpuOverride = MutableStateFlow(false)
+    val gemma4GpuOverride = _gemma4GpuOverride.asStateFlow()
+
     private val _isLoading = MutableStateFlow(false)
     val isLoading = _isLoading.asStateFlow()
     
@@ -118,6 +138,7 @@ class SettingsViewModel @Inject constructor(
                 _cpuThreads.value = hardware.cpuThreads.coerceIn(1, 16)
                 _gpuLayers.value = hardware.gpuLayers.coerceIn(0, 100)
                 _hardwareAccelerationMode.value = hardware.accelerationMode
+                _gemma4GpuOverride.value = hardware.gemma4GpuOverride
             }
         }
     }
@@ -258,12 +279,14 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun setAdvancedInferenceEnabled(enabled: Boolean) {
+        AppEventLogger.info(component = TAG, action = "set_advanced_inference", details = "enabled=$enabled")
         viewModelScope.launch {
             generationPreferences.saveAdvancedInferenceEnabled(enabled)
         }
     }
 
     fun resetToModelDefaults() {
+        AppEventLogger.info(component = TAG, action = "reset_to_model_defaults_requested")
         viewModelScope.launch {
             val model = loadedModel.value
             if (model == null) {
@@ -330,6 +353,7 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun setHardwareAccelerationMode(mode: GenerationPreferences.HardwareAccelerationMode) {
+        AppEventLogger.info(component = TAG, action = "set_hardware_accel_mode", details = "mode=${mode.storageValue}")
         _hardwareAccelerationMode.value = mode
         viewModelScope.launch {
             generationPreferences.saveHardwareAccelerationMode(mode)
@@ -338,6 +362,14 @@ class SettingsViewModel @Inject constructor(
                 _gpuLayers.value = defaultLayers
                 generationPreferences.saveGpuLayers(defaultLayers)
             }
+        }
+    }
+
+    fun setGemma4GpuOverride(enabled: Boolean) {
+        AppEventLogger.warn(component = TAG, action = "set_gemma4_gpu_override", details = "enabled=$enabled")
+        _gemma4GpuOverride.value = enabled
+        viewModelScope.launch {
+            generationPreferences.saveGemma4GpuOverride(enabled)
         }
     }
 
@@ -360,6 +392,7 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun saveSystemPrompt() {
+        AppEventLogger.info(component = TAG, action = "save_system_prompt", details = "length=${_systemPrompt.value.length}")
         viewModelScope.launch {
             val sanitized = _systemPrompt.value.trim()
             generationPreferences.saveSystemPrompt(sanitized)
@@ -374,18 +407,24 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun setTtsVoiceProfile(profile: TtsVoiceProfile) {
+        AppEventLogger.info(component = TAG, action = "set_tts_voice", details = "profile=${profile.storageValue}")
         viewModelScope.launch {
             generationPreferences.saveTtsVoiceProfile(profile)
         }
     }
-    
+
     fun loadModel(
-        modelPath: String, 
-        modelName: String, 
+        modelPath: String,
+        modelName: String,
         modelSize: Long,
         isVisionModel: Boolean = false,
         mmprojPath: String? = null
     ) {
+        AppEventLogger.info(
+            component = TAG,
+            action = "load_model_requested",
+            details = "name=$modelName, sizeMb=${modelSize / (1024 * 1024)}, vision=$isVisionModel, hasMmproj=${mmprojPath != null}"
+        )
         loadModelJob?.cancel()
         loadModelJob = viewModelScope.launch {
             _isLoading.value = true
@@ -434,13 +473,15 @@ class SettingsViewModel @Inject constructor(
     }
     
     fun unloadModel() {
+        AppEventLogger.info(component = TAG, action = "unload_model_requested")
         viewModelScope.launch {
             modelRepository.unloadModel()
             _message.value = "Model unloaded"
         }
     }
-    
+
     fun clearChatHistory() {
+        AppEventLogger.warn(component = TAG, action = "clear_chat_history_requested")
         viewModelScope.launch {
             chatRepository.clearAllHistory()
             _message.value = "Chat history cleared"
@@ -452,6 +493,7 @@ class SettingsViewModel @Inject constructor(
     }
     
     fun applyPreset(preset: String) {
+        AppEventLogger.info(component = TAG, action = "apply_preset", details = "preset=$preset")
         viewModelScope.launch {
             val currentSettings = _generationSettings.value
             val newSettings = when (preset) {

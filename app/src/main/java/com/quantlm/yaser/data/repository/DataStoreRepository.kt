@@ -47,12 +47,12 @@ class DataStoreRepository @Inject constructor(
 
     suspend fun setLockTimeout(seconds: Int) = appPreferences.setLockTimeout(seconds)
 
-    fun verifyPin(pin: String): Flow<Boolean> = appPreferences.verifyPin(pin)
+    suspend fun verifyPin(pin: String): Boolean = appPreferences.verifyPin(pin)
 
-    fun verifyPassword(password: String): Flow<Boolean> =
+    suspend fun verifyPassword(password: String): Boolean =
         appPreferences.verifyPassword(password)
 
-    fun verifyPattern(pattern: String): Flow<Boolean> =
+    suspend fun verifyPattern(pattern: String): Boolean =
         appPreferences.verifyPattern(pattern)
 
     fun getStoredPin(): Flow<String?> = appPreferences.getStoredPin()

@@ -1,13 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older that API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+   Auto Backup rules for API <= 30. Everything not excluded is backed up.
+
+   Excludes (mirrored in data_extraction_rules.xml for API 31+):
+   - models/        multi-GB and re-downloadable; including them blows the
+                    25 MB Auto Backup quota, which silently disabled backup
+                    of EVERYTHING (the transport rejects oversized apps).
+   - huggingface_auth.xml  EncryptedSharedPreferences ciphertext bound to this
+                    device's Keystore key — undecryptable anywhere else.
+   - diagnostics/   AppEventLogger file log; can contain user content such as
+                    web-search queries and model/prompt metadata.
+   - datastore/     Contains PBKDF2 hashes of the user's PIN/password/pattern.
+                    Backing this up would let an offline attacker brute-force
+                    the hash without the in-app lockout gate.
+   - quantlm_lock_state.xml  Persisted failed-attempt counter; excluded so a
+                    backup restore to a new device starts with a clean slate.
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <exclude domain="file" path="models" />
+    <exclude domain="file" path="diagnostics" />
+    <exclude domain="file" path="datastore" />
+    <exclude domain="sharedpref" path="huggingface_auth.xml" />
+    <exclude domain="sharedpref" path="quantlm_lock_state.xml" />
 </full-backup-content>

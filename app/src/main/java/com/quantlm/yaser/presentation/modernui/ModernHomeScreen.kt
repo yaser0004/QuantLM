@@ -21,7 +21,7 @@ import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
-import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -75,7 +75,7 @@ fun ModernHomeScreen(
         HubEntry(
             title = "System logs",
             subtitle = "Recent QuantLM log lines from this device",
-            icon = Icons.Default.List,
+            icon = Icons.Default.Build,
             route = ModernDestinations.SystemLogs
         ),
         HubEntry(

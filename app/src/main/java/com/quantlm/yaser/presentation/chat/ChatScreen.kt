@@ -22,13 +22,16 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -38,6 +41,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CameraAlt
@@ -46,10 +50,18 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.TravelExplore
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -65,6 +77,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -73,6 +86,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -90,6 +104,7 @@ import com.quantlm.yaser.domain.model.DownloadableModel
 import com.quantlm.yaser.domain.model.DownloadState
 import com.quantlm.yaser.domain.model.GenerationState
 import com.quantlm.yaser.domain.model.GenerationStats
+import com.quantlm.yaser.domain.model.isVisionModel
 import com.quantlm.yaser.domain.model.Message
 import com.quantlm.yaser.domain.model.PromptCategory
 import com.quantlm.yaser.domain.model.PromptTemplate
@@ -98,11 +113,15 @@ import com.quantlm.yaser.domain.model.ToolCall
 import com.quantlm.yaser.domain.model.ToolResult
 import com.quantlm.yaser.domain.model.MobileTools
 import com.quantlm.yaser.domain.model.VisionQuickAction
+import com.quantlm.yaser.domain.model.WebSourceRef
 import com.quantlm.yaser.domain.tts.TtsVoiceProfile
 import com.quantlm.yaser.data.audio.AudioInputState
 import com.quantlm.yaser.presentation.models.ModelDownloadViewModel
 import com.quantlm.yaser.presentation.modern.ModernDateSeparator
+import androidx.compose.foundation.gestures.animateScrollBy
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
@@ -375,6 +394,9 @@ fun ChatThreadScaffold(
     viewModel: ChatViewModel,
     onNavigateToSettings: () -> Unit = {},
     onNavigateToSystemLogs: () -> Unit = {},
+    // Phase 2 (§3.5): chooser "Download" action routes here, optionally with a
+    // pre-selected model id to scroll to / pre-expand in the download screen.
+    onNavigateToDownloads: (preselectModelId: String?) -> Unit = { _ -> },
     topBar: @Composable (
         onOpenHistory: () -> Unit,
         onNewChat: () -> Unit,
@@ -388,12 +410,38 @@ fun ChatThreadScaffold(
     val modelDownloadViewModel: ModelDownloadViewModel = hiltViewModel()
     val clipboardManager = LocalClipboardManager.current
     val messages by viewModel.messages.collectAsState()
-    val generationState by viewModel.generationState.collectAsState()
+    // Narrowed reads: collecting the raw GenerationState here meant the whole
+    // scaffold's snapshot scope was invalidated on every streaming-token
+    // emission (~2.5×/sec). These derived flows only emit when the *predicate*
+    // flips, so the parent body recomposes once per state transition. The
+    // streaming text itself is read inside [StreamingAutoScroll] and the
+    // generating bubble — both narrow children that own their own recompositions.
+    val isGenerating by remember(viewModel) {
+        viewModel.generationState
+            .map { it is GenerationState.Generating }
+            .distinctUntilChanged()
+    }.collectAsState(initial = false)
+    val isLoadingOrSearching by remember(viewModel) {
+        viewModel.generationState
+            .map {
+                // Any pre-token "we're working on it" phase. Includes the new
+                // audio / vision / reasoning indicators so input-disable, stop
+                // button, and any other gates that observed loading-or-searching
+                // continue to fire correctly throughout the prefill window.
+                it is GenerationState.Loading ||
+                    it is GenerationState.SearchingWeb ||
+                    it is GenerationState.TranscribingAudio ||
+                    it is GenerationState.AnalyzingImage ||
+                    it is GenerationState.PreparingReasoning
+            }
+            .distinctUntilChanged()
+    }.collectAsState(initial = false)
     val inputText by viewModel.inputText.collectAsState()
     val loadedModel by viewModel.loadedModel.collectAsState()
     val conversations by viewModel.conversations.collectAsState()
     val currentConversationId by viewModel.currentConversationId.collectAsState()
     val selectedImages by viewModel.selectedImages.collectAsState()
+    val selectedAudio by viewModel.selectedAudio.collectAsState()
     val activeQuickAction by viewModel.activeQuickAction.collectAsState()
     val selectedTemplate by viewModel.selectedTemplate.collectAsState()
     val isToolCallingEnabled by viewModel.isToolCallingEnabled.collectAsState()
@@ -405,6 +453,9 @@ fun ChatThreadScaffold(
     val modelDownloadStates by modelDownloadViewModel.downloadStates.collectAsState()
     val audioInputState by viewModel.audioInputManager.audioInputState.collectAsState()
     val generationSettings by viewModel.generationSettings.collectAsState()
+    val loadedModelCapabilities by viewModel.loadedModelCapabilities.collectAsState()
+    val liveThinkingContent by viewModel.liveThinkingContent.collectAsState()
+    val liveThoughtSummary by viewModel.liveThoughtSummary.collectAsState()
     val listState = rememberLazyListState()
     var autoScrollEnabled by remember { mutableStateOf(true) }
     val isAtBottom by remember {
@@ -428,6 +479,15 @@ fun ChatThreadScaffold(
     
     var showClearHistoryDialog by remember { mutableStateOf(false) }
     var showVisionModelDialog by remember { mutableStateOf(false) }
+    // Phase 2 (§3.5 / §4.4): generalized capability chooser sheet target.
+    var pendingCapabilityChooser by remember {
+        mutableStateOf<com.quantlm.yaser.domain.model.ModelCapability?>(null)
+    }
+    // Phase 2 (§3.8): pending audio-source picker. Skill manager bottom sheet trigger
+    // lives in ChatViewModel (Sub-phase F) — exposed via the composer toggle.
+    var showAudioSourceDialog by remember { mutableStateOf(false) }
+    var showAudioRecorderDialog by remember { mutableStateOf(false) }
+    var showSkillManagerSheet by remember { mutableStateOf(false) }
     var showImageSourceDialog by remember { mutableStateOf(false) }
     var pendingVisionAction by remember { mutableStateOf<PendingVisionAction?>(null) }
     var pendingVisionDownloadModelId by remember { mutableStateOf<String?>(null) }
@@ -486,6 +546,24 @@ fun ChatThreadScaffold(
         }
     }
     
+    // Audio file picker launcher (Audio Scribe — pick a file)
+    val audioPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let { viewModel.pickAudioFile(it) }
+    }
+
+    // Microphone permission launcher for the Audio Scribe recorder
+    val recorderPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            showAudioRecorderDialog = true
+        } else {
+            Toast.makeText(context, "Microphone permission is required to record audio", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     // Camera launcher
     val cameraLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
@@ -673,14 +751,16 @@ fun ChatThreadScaffold(
         }
     }
 
-    LaunchedEffect(
-        (generationState as? GenerationState.Generating)?.currentText?.length,
-        autoScrollEnabled
-    ) {
-        if (generationState is GenerationState.Generating && messages.isNotEmpty() && autoScrollEnabled) {
-            listState.scrollToItem(messages.size)
-        }
-    }
+    // Owns its own generationState read so per-token emissions don't invalidate
+    // the parent scaffold. Also scrolls to keep the *bottom* of the streaming
+    // bubble in view (the prior scrollToItem pinned its top, so the user saw the
+    // beginning of the growing bubble rather than the latest tokens).
+    StreamingAutoScroll(
+        viewModel = viewModel,
+        listState = listState,
+        autoScrollEnabled = autoScrollEnabled,
+        hasMessages = messages.isNotEmpty(),
+    )
     
     // Image source selection dialog
     if (showImageSourceDialog) {
@@ -741,6 +821,80 @@ fun ChatThreadScaffold(
         )
     }
     
+    // Phase 2 (§3.5 / §4.4): capability-restricted model chooser. Lists both
+    // already-downloaded models that declare the capability and ones still
+    // available to download. "Use" reuses [ChatViewModel.switchToModelForCapability];
+    // "Download" navigates to the existing download flow.
+    val pendingCapability = pendingCapabilityChooser
+    val isLoadingCapabilityModel by viewModel.isLoadingCapabilityModel.collectAsState()
+    if (pendingCapability != null) {
+        val state by (viewModel.capabilityModelStates[pendingCapability]
+            ?: viewModel.capabilityModelStates.values.first())
+            .collectAsState()
+        val downloaded: List<DownloadableModel> = (state as? CapabilityModelState.Downloaded)?.allDownloaded ?: emptyList()
+        val available: List<DownloadableModel> = (state as? CapabilityModelState.NotDownloaded)?.available
+            ?: com.quantlm.yaser.domain.model.AvailableModels.getAllModels()
+                .filter { pendingCapability in it.capabilities }
+        val activeFileName = loadedModel?.filePath?.let { java.io.File(it).name }
+        CapabilityModelChooserSheet(
+            capability = pendingCapability,
+            downloaded = downloaded,
+            available = available.filter { it !in downloaded },
+            onUse = { selected ->
+                viewModel.switchToModelForCapability(pendingCapability, selected) { success ->
+                    if (success) pendingCapabilityChooser = null
+                    else Toast.makeText(context, "Failed to load model", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onDownload = { selected ->
+                pendingCapabilityChooser = null
+                onNavigateToDownloads(selected.id)
+            },
+            onDismiss = { if (!isLoadingCapabilityModel) pendingCapabilityChooser = null },
+            activeModelFileName = activeFileName,
+        )
+    }
+
+    // Audio source picker (Record a real clip / Pick an audio file).
+    if (showAudioSourceDialog) {
+        AudioSourceDialog(
+            onDismiss = { showAudioSourceDialog = false },
+            onRecord = {
+                showAudioSourceDialog = false
+                if (ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    showAudioRecorderDialog = true
+                } else {
+                    recorderPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            },
+            onPickFile = {
+                showAudioSourceDialog = false
+                audioPickerLauncher.launch("audio/*")
+            },
+        )
+    }
+
+    // Audio Scribe recorder — captures a real audio clip for the model.
+    if (showAudioRecorderDialog) {
+        AudioRecorderDialog(
+            audioInputManager = viewModel.audioInputManager,
+            onAttach = { pcmPath -> viewModel.attachRecordedAudio(pcmPath) },
+            onDismiss = { showAudioRecorderDialog = false },
+        )
+    }
+
+    // Phase 2 (§3.9): skill manager bottom sheet (full body in Sub-phase F).
+    if (showSkillManagerSheet) {
+        SkillManagerBottomSheet(
+            onDismiss = { showSkillManagerSheet = false },
+            viewModel = viewModel,
+        )
+    }
+
     // Clear history confirmation dialog
     if (showClearHistoryDialog) {
         AlertDialog(
@@ -925,6 +1079,16 @@ fun ChatThreadScaffold(
             }
         }
     ) {
+        val snackbarHostState = remember { SnackbarHostState() }
+        val snackScope = rememberCoroutineScope()
+        LaunchedEffect(Unit) {
+            viewModel.snackbarMessages.collect { message ->
+                snackScope.launch {
+                    snackbarHostState.showSnackbar(message, duration = SnackbarDuration.Short)
+                }
+            }
+        }
+
         Scaffold(
             topBar = {
                 topBar(
@@ -932,12 +1096,14 @@ fun ChatThreadScaffold(
                     { viewModel.startNewConversation() },
                     { showClearHistoryDialog = true }
                 )
-            }
+            },
+            snackbarHost = { SnackbarHost(snackbarHostState) },
         ) { paddingValues ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
+                .imePadding()
         ) {
             // Messages list
             Box(
@@ -945,7 +1111,7 @@ fun ChatThreadScaffold(
                     .weight(1f)
                     .fillMaxWidth()
             ) {
-                if (messages.isEmpty() && generationState !is GenerationState.Generating) {
+                if (messages.isEmpty() && !isGenerating) {
                     // Empty state
                     Column(
                         modifier = Modifier
@@ -978,12 +1144,29 @@ fun ChatThreadScaffold(
                             items = messages,
                             key = { _, message -> message.id }
                         ) { index, message ->
+                            // Model-switch marker: visual separator only, never a real message.
+                            if (message.isModelChangeMarker) {
+                                ModelSwitchSeparator(modelName = message.markerModelName ?: "new model")
+                                return@itemsIndexed
+                            }
+
                             if (bubbleStyle == MessageBubbleStyle.Modern) {
                                 val showDate = index == 0 ||
                                     !isSameLocalDay(messages[index - 1].timestamp, message.timestamp)
                                 if (showDate) {
                                     ModernDateSeparator(timestampMillis = message.timestamp)
                                 }
+                            }
+                            // Phase 2 (§3.6 / §4.3): thinking bubble rendered
+                            // above the assistant content when the message
+                            // carries a persisted reasoning block.
+                            if (!message.isUser && !message.thinkingContent.isNullOrBlank()) {
+                                MessageBodyThinking(
+                                    text = message.thinkingContent,
+                                    thoughtSummary = message.thoughtSummary,
+                                    inProgress = false,
+                                    modifier = Modifier.padding(bottom = 4.dp),
+                                )
                             }
                             MessageBubble(
                                 message = message,
@@ -997,55 +1180,15 @@ fun ChatThreadScaffold(
                                 ttsVoiceProfile = generationSettings.ttsVoiceProfile
                             )
                         }
-                        
-                        // Show loading/thinking indicator
-                        if (generationState is GenerationState.Loading) {
-                            item {
-                                // Check if the last user message had images (vision query)
-                                val lastUserMessage = messages.lastOrNull { it.isUser }
-                                val isVisionQuery = lastUserMessage?.hasImages == true
-                                ThinkingIndicator(
-                                    isVisionQuery = isVisionQuery,
-                                    style = bubbleStyle
-                                )
-                            }
-                        }
-                        
-                        // Show generating state
-                        if (generationState is GenerationState.Generating) {
-                            item {
-                                val currentText = (generationState as GenerationState.Generating).currentText
-                                StreamingMessageBubble(text = currentText, style = bubbleStyle)
-                            }
-                        }
-                        
-                        // Show cancelled state
-                        if (generationState is GenerationState.Cancelled) {
-                            item {
-                                CancelledMessageBubble()
-                            }
-                        }
-                        
-                        // Show error state
-                        if (generationState is GenerationState.Error) {
-                            item {
-                                val errorMessage = (generationState as GenerationState.Error).message
-                                ErrorMessageBubble(errorMessage = errorMessage)
-                            }
-                        }
-                        
-                        // Show pending tool call
-                        pendingToolCall?.let { toolCall ->
-                            item {
-                                ToolCallBubble(
-                                    toolCall = toolCall,
-                                    result = toolResult,
-                                    isPending = toolResult == null,
-                                    onApprove = { viewModel.executeToolCall(toolCall) },
-                                    onReject = { viewModel.rejectToolCall() }
-                                )
-                            }
-                        }
+
+                        generatingResponseSection(
+                            viewModel = viewModel,
+                            bubbleStyle = bubbleStyle,
+                            messages = messages,
+                            toolResult = toolResult,
+                            liveThinkingContent = liveThinkingContent,
+                            liveThoughtSummary = liveThoughtSummary,
+                        )
                     }
                 }
             }
@@ -1058,25 +1201,25 @@ fun ChatThreadScaffold(
                 )
             }
 
-            // Fix [2.7]: productivity templates next to vision quick actions (TODO list, meeting notes)
-            ProductivityTemplateQuickBar(
-                selectedTemplate = selectedTemplate,
-                onSelectTemplate = viewModel::selectTemplate
-            )
-            
+            // Phase 2 (§3.4 / §4.2): ProductivityTemplateQuickBar removed per
+            // spec. TODO_LIST / MEETING_NOTES remain reachable via the prompt
+            // library entry in the `+` menu.
+
             // Input area
             ChatInputArea(
                 inputText = inputText,
                 onInputChange = viewModel::setInputText,
                 onSend = viewModel::sendMessage,
                 onStop = viewModel::stopGeneration,
-                isGenerating = generationState is GenerationState.Generating,
-                isLoading = generationState is GenerationState.Loading,
+                isGenerating = isGenerating,
+                isLoading = isLoadingOrSearching,
                 isEnabled = true,  // Always enable keyboard - will show error if no model loaded
                 selectedImages = selectedImages,
                 onImageSelect = handleImageClick,
                 onImageRemove = viewModel::removeImage,
                 onImagesClear = viewModel::clearSelectedImages,
+                selectedAudio = selectedAudio,
+                onAudioRemove = viewModel::removeAudio,
                 isVisionSupported = isVisionSupported,
                 maxImages = ChatViewModel.MAX_IMAGES,
                 onTemplateSelect = viewModel::selectTemplate,
@@ -1085,9 +1228,184 @@ fun ChatThreadScaffold(
                 audioInputState = audioInputState,
                 onMicClick = handleMicClick,
                 onMicStop = handleMicStop,
-                useModernChrome = useModernComposer
+                useModernChrome = useModernComposer,
+                loadedModelCapabilities = loadedModelCapabilities,
+                reasoningEnabled = generationSettings.enableThinking,
+                speculativeDecodingEnabled = generationSettings.enableSpeculativeDecoding,
+                agentSkillsEnabled = generationSettings.enableAgentSkills,
+                webSearchEnabled = generationSettings.enableWebSearch,
+                onReasoningToggle = viewModel::setEnableThinking,
+                onSpeculativeDecodingToggle = viewModel::setEnableSpeculativeDecoding,
+                onAgentSkillsToggle = viewModel::setEnableAgentSkills,
+                onWebSearchToggle = viewModel::setEnableWebSearch,
+                onAudioScribe = { showAudioSourceDialog = true },
+                onShowCapabilityChooser = { capability ->
+                    viewModel.refreshCapabilityModelStates()
+                    viewModel.logCapabilityChooserOpened(capability, reason = "disabled_tap")
+                    pendingCapabilityChooser = capability
+                },
+                onOpenSkillManager = { showSkillManagerSheet = true },
+                enabledSkillNames = viewModel.enabledSkillNames.collectAsState().value,
             )
         }
+        }
+    }
+}
+
+/**
+ * Owns the per-token recomposition for streaming auto-scroll. Reading
+ * [ChatViewModel.generationState] in here (rather than at the scaffold's top)
+ * confines invalidations to this composable; the parent only re-runs when
+ * boolean flags flip.
+ *
+ * Scroll behavior: when the streaming bubble's bottom drifts past the viewport
+ * end, animate the list down by exactly that overhang so the latest tokens are
+ * visible. The previous `scrollToItem(messages.size)` pinned the *top* of the
+ * streaming bubble to the viewport top, so as the bubble grew the user saw its
+ * beginning rather than the freshest tokens. The key is bucketed to ~80 chars
+ * so a long reply doesn't fire 2.5 scrolls/sec for the entire duration.
+ */
+@Composable
+private fun StreamingAutoScroll(
+    viewModel: ChatViewModel,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    autoScrollEnabled: Boolean,
+    hasMessages: Boolean,
+) {
+    val generationState by viewModel.generationState.collectAsState()
+    val isGenerating = generationState is GenerationState.Generating
+    // Phase 1B: rescroll once per ~3 lines of text rather than once per ~1 line.
+    // Each scrollKey change re-reads listState.layoutInfo and animates a scroll,
+    // both of which force a layout pass on the entire LazyColumn. At 80-char
+    // granularity that fires too often during streaming and contributes to
+    // main-thread frame budget exhaustion.
+    val scrollKey = ((generationState as? GenerationState.Generating)
+        ?.currentText?.length ?: 0) / 240
+    LaunchedEffect(scrollKey, autoScrollEnabled, isGenerating, hasMessages) {
+        if (!isGenerating || !autoScrollEnabled || !hasMessages) return@LaunchedEffect
+        val info = listState.layoutInfo
+        val lastIndex = info.totalItemsCount - 1
+        if (lastIndex < 0) return@LaunchedEffect
+        val lastItem = info.visibleItemsInfo.lastOrNull { it.index == lastIndex }
+        if (lastItem == null) {
+            listState.scrollToItem(lastIndex)
+            return@LaunchedEffect
+        }
+        val overhang = (lastItem.offset + lastItem.size) - info.viewportEndOffset
+        if (overhang > 0) {
+            listState.animateScrollBy(overhang.toFloat())
+        }
+    }
+}
+
+private fun LazyListScope.generatingResponseSection(
+    viewModel: ChatViewModel,
+    bubbleStyle: MessageBubbleStyle,
+    messages: List<Message>,
+    toolResult: ToolResult?,
+    liveThinkingContent: String?,
+    liveThoughtSummary: String?,
+) {
+    item {
+        GeneratingResponseStateContent(
+            viewModel = viewModel,
+            bubbleStyle = bubbleStyle,
+            messages = messages,
+            toolResult = toolResult,
+            liveThinkingContent = liveThinkingContent,
+            liveThoughtSummary = liveThoughtSummary,
+        )
+    }
+}
+
+@Composable
+private fun GeneratingResponseStateContent(
+    viewModel: ChatViewModel,
+    bubbleStyle: MessageBubbleStyle,
+    messages: List<Message>,
+    toolResult: ToolResult?,
+    liveThinkingContent: String?,
+    liveThoughtSummary: String?,
+) {
+    val generationState by viewModel.generationState.collectAsState()
+    val pendingToolCall by viewModel.pendingToolCall.collectAsState()
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        if (generationState is GenerationState.Loading) {
+            val lastUserMessage = messages.lastOrNull { it.isUser }
+            val isVisionQuery = lastUserMessage?.hasImages == true
+            ThinkingIndicator(isVisionQuery = isVisionQuery, style = bubbleStyle)
+        }
+
+        if (generationState is GenerationState.SearchingWeb) {
+            WebSearchIndicator(
+                message = (generationState as GenerationState.SearchingWeb).message,
+                style = bubbleStyle,
+            )
+        }
+
+        if (generationState is GenerationState.TranscribingAudio) {
+            val audioState = generationState as GenerationState.TranscribingAudio
+            AudioScribeIndicator(
+                message = audioState.message,
+                style = bubbleStyle,
+                withReasoning = audioState.alsoReasoning,
+            )
+        }
+
+        if (generationState is GenerationState.AnalyzingImage) {
+            val visionState = generationState as GenerationState.AnalyzingImage
+            VisionIndicator(
+                message = visionState.message,
+                style = bubbleStyle,
+                withReasoning = visionState.alsoReasoning,
+            )
+        }
+
+        if (generationState is GenerationState.PreparingReasoning) {
+            ReasoningIndicator(
+                message = (generationState as GenerationState.PreparingReasoning).message,
+                style = bubbleStyle,
+            )
+        }
+
+        val showThinking = generationState is GenerationState.Thinking ||
+            (generationState is GenerationState.Generating && liveThinkingContent != null)
+        if (showThinking) {
+            val liveState = generationState as? GenerationState.Thinking
+            val thinkingText = liveState?.content ?: liveThinkingContent ?: ""
+            val inProgress = liveState?.partial == true
+            val liveSummary = liveState?.thoughtSummary ?: liveThoughtSummary
+            MessageBodyThinking(
+                text = thinkingText,
+                thoughtSummary = liveSummary,
+                inProgress = inProgress,
+                modifier = Modifier.padding(end = 16.dp),
+            )
+        }
+
+        if (generationState is GenerationState.Generating) {
+            val currentText = (generationState as GenerationState.Generating).currentText
+            StreamingMessageBubble(text = currentText, style = bubbleStyle)
+        }
+
+        if (generationState is GenerationState.Cancelled) {
+            CancelledMessageBubble()
+        }
+
+        if (generationState is GenerationState.Error) {
+            val errorMessage = (generationState as GenerationState.Error).message
+            ErrorMessageBubble(errorMessage = errorMessage)
+        }
+
+        pendingToolCall?.let { toolCall ->
+            ToolCallBubble(
+                toolCall = toolCall,
+                result = toolResult,
+                isPending = toolResult == null,
+                onApprove = { viewModel.executeToolCall(toolCall) },
+                onReject = { viewModel.rejectToolCall() }
+            )
         }
     }
 }
@@ -1100,11 +1418,13 @@ fun ChatScreen(
     onNavigateToSettings: () -> Unit = {},
     onNavigateToSystemLogs: () -> Unit = {}
 ) {
+    com.quantlm.yaser.presentation.util.LogScreenLifecycle("ChatScreen")
     val loadedModel by viewModel.loadedModel.collectAsState()
     ChatThreadScaffold(
         viewModel = viewModel,
         onNavigateToSettings = onNavigateToSettings,
         onNavigateToSystemLogs = onNavigateToSystemLogs,
+        onNavigateToDownloads = { _ -> onNavigateToDownloads() },
         topBar = { onOpenHistory, _onNewChat, _onClearHistory ->
             val modelSubtitle = loadedModel?.name ?: "Tap model icon to choose model"
             Surface(
@@ -1193,6 +1513,103 @@ fun ChatScreen(
         enableConversationListDialog = true,
         useModernComposer = true
     )
+}
+
+/**
+ * Collapsible "Sources" element shown under a web-search-grounded answer.
+ * Collapsed by default — tapping the header reveals the source list; tapping a
+ * source opens it in the browser.
+ */
+@Composable
+private fun MessageSourcesSection(
+    sources: List<WebSourceRef>,
+    contentColor: Color,
+) {
+    val context = LocalContext.current
+    var expanded by remember { mutableStateOf(false) }
+    val mutedColor = contentColor.copy(alpha = 0.7f)
+
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .clickable { expanded = !expanded }
+                .padding(vertical = 2.dp, horizontal = 2.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Default.TravelExplore,
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = mutedColor,
+            )
+            Text(
+                text = "Sources (${sources.size})",
+                style = MaterialTheme.typography.labelMedium,
+                color = mutedColor,
+            )
+            Icon(
+                imageVector = Icons.Default.ExpandMore,
+                contentDescription = if (expanded) "Hide sources" else "Show sources",
+                modifier = Modifier
+                    .size(16.dp)
+                    .rotate(if (expanded) 180f else 0f),
+                tint = mutedColor,
+            )
+        }
+        AnimatedVisibility(visible = expanded) {
+            Column(
+                modifier = Modifier.padding(top = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                sources.forEachIndexed { index, source ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(source.url))
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    )
+                                }
+                            }
+                            .padding(vertical = 4.dp, horizontal = 2.dp),
+                    ) {
+                        Text(
+                            text = "${index + 1}.",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = mutedColor,
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = source.title,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = contentColor,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = source.domain,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = mutedColor,
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.OpenInNew,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = mutedColor,
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -1319,14 +1736,54 @@ fun MessageBubble(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                     }
-                    
+
+                    // Show attached audio clips if present (Audio Scribe)
+                    if (message.audioPaths.isNotEmpty()) {
+                        message.audioPaths.forEach { _ ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.AudioFile,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = contentColor
+                                )
+                                Text(
+                                    text = "Audio clip",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = contentColor
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+
                     val textColor = contentColor
-                    val segments = parseMessageContent(message.content)
+                    // Phase 1A: memoize against message content. Every streaming
+                    // token emit triggers a recomposition of the surrounding
+                    // LazyColumn; without remember, every prior assistant bubble
+                    // re-runs its Regex code-fence scan on every emit. With a
+                    // handful of long replies in the history that quickly turns
+                    // into the main-thread freeze that fires "Davey!" warnings.
+                    val segments = remember(message.content) { parseMessageContent(message.content) }
                     MessageSegmentsContent(
                         segments = segments,
                         textColor = textColor,
                         clipboardManager = clipboardManager
                     )
+
+                    // Web Search: collapsible list of the sources used to
+                    // ground this answer. Only assistant messages produced with
+                    // the toggle on carry sources.
+                    if (!message.isUser && message.sources.isNotEmpty()) {
+                        MessageSourcesSection(
+                            sources = message.sources,
+                            contentColor = contentColor,
+                        )
+                    }
+
                     Spacer(modifier = Modifier.height(4.dp))
                     
                     // Timestamp row with generation time for AI messages
@@ -2056,6 +2513,165 @@ private fun ModernStreamingCursor(color: Color) {
     )
 }
 
+/**
+ * Web Search status bubble: shown while the Web Search feature discovers and
+ * scrapes pages. Carries an explicit "this may take a few seconds" message so
+ * the user knows the wait is expected.
+ */
+@Composable
+fun ModelSwitchSeparator(modelName: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        HorizontalDivider(
+            modifier = Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.outlineVariant,
+        )
+        SuggestionChip(
+            onClick = {},
+            label = {
+                Text(
+                    text = "↕  Context reset · $modelName",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            },
+            colors = SuggestionChipDefaults.suggestionChipColors(
+                containerColor = MaterialTheme.colorScheme.surface,
+            ),
+            border = SuggestionChipDefaults.suggestionChipBorder(
+                enabled = true,
+                borderColor = MaterialTheme.colorScheme.outlineVariant,
+            ),
+        )
+        HorizontalDivider(
+            modifier = Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.outlineVariant,
+        )
+    }
+}
+
+@Composable
+fun WebSearchIndicator(
+    message: String,
+    style: MessageBubbleStyle = MessageBubbleStyle.Classic,
+) {
+    PrefillPhaseIndicator(message = message, icons = listOf(Icons.Default.TravelExplore), style = style)
+}
+
+@Composable
+fun AudioScribeIndicator(
+    message: String,
+    style: MessageBubbleStyle = MessageBubbleStyle.Classic,
+    withReasoning: Boolean = false,
+) {
+    PrefillPhaseIndicator(
+        message = message,
+        icons = if (withReasoning) {
+            listOf(Icons.Default.Mic, Icons.Default.Psychology)
+        } else {
+            listOf(Icons.Default.Mic)
+        },
+        style = style,
+    )
+}
+
+@Composable
+fun VisionIndicator(
+    message: String,
+    style: MessageBubbleStyle = MessageBubbleStyle.Classic,
+    withReasoning: Boolean = false,
+) {
+    PrefillPhaseIndicator(
+        message = message,
+        icons = if (withReasoning) {
+            listOf(Icons.Default.Visibility, Icons.Default.Psychology)
+        } else {
+            listOf(Icons.Default.Visibility)
+        },
+        style = style,
+    )
+}
+
+@Composable
+fun ReasoningIndicator(
+    message: String,
+    style: MessageBubbleStyle = MessageBubbleStyle.Classic,
+) {
+    PrefillPhaseIndicator(message = message, icons = listOf(Icons.Default.Psychology), style = style)
+}
+
+/**
+ * Shared visual shell for the pre-token phase indicators (web search,
+ * audio scribe, vision, reasoning prelude, and combinations of media +
+ * reasoning). Identical bubble + spinner + message layout — only the
+ * leading icon set and the message vary. When [icons] has more than one
+ * entry the icons render in a tight row before the message, signaling
+ * combined phases (e.g. mic + brain for audio-with-reasoning).
+ */
+@Composable
+private fun PrefillPhaseIndicator(
+    message: String,
+    icons: List<androidx.compose.ui.graphics.vector.ImageVector>,
+    style: MessageBubbleStyle,
+) {
+    val bubbleColor = when (style) {
+        MessageBubbleStyle.Classic -> MaterialTheme.colorScheme.tertiaryContainer
+        MessageBubbleStyle.Modern -> MaterialTheme.colorScheme.surfaceVariant
+    }
+    val contentColor = when (style) {
+        MessageBubbleStyle.Classic -> MaterialTheme.colorScheme.onTertiaryContainer
+        MessageBubbleStyle.Modern -> MaterialTheme.colorScheme.onSurface
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start,
+    ) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = bubbleColor,
+            modifier = Modifier.widthIn(max = 280.dp),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = contentColor,
+                )
+                // Icons are packed tight against each other so the user reads
+                // them as a compound "audio + reasoning" rather than two
+                // separate concerns separated by message gap.
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    icons.forEach { icon ->
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = contentColor,
+                        )
+                    }
+                }
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = contentColor,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 fun ThinkingIndicator(
     isVisionQuery: Boolean = false,
@@ -2193,6 +2809,8 @@ fun ChatInputArea(
     onImageSelect: () -> Unit = {},
     onImageRemove: (String) -> Unit = {},
     onImagesClear: () -> Unit = {},
+    selectedAudio: List<String> = emptyList(),
+    onAudioRemove: (String) -> Unit = {},
     isVisionSupported: Boolean = false,
     maxImages: Int = 4,
     onTemplateSelect: (PromptTemplate) -> Unit = {},
@@ -2202,9 +2820,25 @@ fun ChatInputArea(
     audioInputState: AudioInputState = AudioInputState.Idle,
     onMicClick: () -> Unit = {},
     onMicStop: () -> Unit = {},
-    useModernChrome: Boolean = false
+    useModernChrome: Boolean = false,
+    // Phase 2 (§3.4 / §4.1): capability toggles surfaced inside the `+` menu.
+    loadedModelCapabilities: Set<com.quantlm.yaser.domain.model.ModelCapability> = emptySet(),
+    reasoningEnabled: Boolean = false,
+    speculativeDecodingEnabled: Boolean = false,
+    agentSkillsEnabled: Boolean = false,
+    // Web Search: model-agnostic toggle, never gated by model capability.
+    webSearchEnabled: Boolean = false,
+    onReasoningToggle: (Boolean) -> Unit = {},
+    onSpeculativeDecodingToggle: (Boolean) -> Unit = {},
+    onAgentSkillsToggle: (Boolean) -> Unit = {},
+    onWebSearchToggle: (Boolean) -> Unit = {},
+    onAudioScribe: () -> Unit = {},
+    onShowCapabilityChooser: (com.quantlm.yaser.domain.model.ModelCapability) -> Unit = {},
+    onOpenSkillManager: () -> Unit = {},
+    enabledSkillNames: List<String> = emptyList(),
 ) {
     val hasImages = selectedImages.isNotEmpty()
+    val hasAttachments = hasImages || selectedAudio.isNotEmpty()
     var showTemplateSheet by remember { mutableStateOf(false) }
     var showToolsMenu by remember { mutableStateOf(false) }
     val isListening = audioInputState is AudioInputState.Listening
@@ -2261,7 +2895,27 @@ fun ChatInputArea(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
             }
-            
+
+            // Show selected audio attachments (Audio Scribe)
+            if (selectedAudio.isNotEmpty()) {
+                SelectedAudioPreview(
+                    audioPaths = selectedAudio,
+                    onRemoveAudio = onAudioRemove,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+
+            // Phase 2 (§3.9 / §4.2): enabled-skill chip strip surfaces only when
+            // agent skills is enabled AND at least one skill is selected. Tap
+            // opens the skill manager bottom sheet.
+            if (agentSkillsEnabled && enabledSkillNames.isNotEmpty()) {
+                AgentSkillsChipStrip(
+                    skillNames = enabledSkillNames,
+                    onOpenManager = onOpenSkillManager,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2293,6 +2947,93 @@ fun ChatInputArea(
                     expanded = showToolsMenu,
                     onDismissRequest = { showToolsMenu = false }
                 ) {
+                    // Phase 2 (§3.4 / §4.1): capability-aware composer menu.
+                    // Items render as enabled / greyed-but-tappable per the
+                    // active model's [ModelCapability] set. Tapping a greyed
+                    // capability opens the capability-restricted chooser.
+                    val capVision = com.quantlm.yaser.domain.model.ModelCapability.VISION
+                    val capAudio = com.quantlm.yaser.domain.model.ModelCapability.AUDIO
+                    val capReasoning = com.quantlm.yaser.domain.model.ModelCapability.REASONING
+                    val capSpecDec = com.quantlm.yaser.domain.model.ModelCapability.SPECULATIVE_DECODING
+                    val capAgent = com.quantlm.yaser.domain.model.ModelCapability.AGENT_SKILLS
+
+                    CapabilityMenuItem(
+                        label = "Add image",
+                        icon = Icons.Default.Image,
+                        active = capVision in loadedModelCapabilities || isVisionSupported,
+                        onActiveClick = {
+                            showToolsMenu = false
+                            onImageSelect()
+                        },
+                        onInactiveClick = {
+                            showToolsMenu = false
+                            onShowCapabilityChooser(capVision)
+                        },
+                    )
+                    CapabilityMenuItem(
+                        label = "Audio Scribe",
+                        icon = Icons.Default.Mic,
+                        active = capAudio in loadedModelCapabilities,
+                        onActiveClick = {
+                            showToolsMenu = false
+                            onAudioScribe()
+                        },
+                        onInactiveClick = {
+                            showToolsMenu = false
+                            onShowCapabilityChooser(capAudio)
+                        },
+                    )
+                    HorizontalDivider()
+                    CapabilityToggleItem(
+                        label = "Reasoning",
+                        icon = Icons.Default.AutoAwesome,
+                        active = capReasoning in loadedModelCapabilities,
+                        checked = reasoningEnabled && capReasoning in loadedModelCapabilities,
+                        onCheckedChange = { onReasoningToggle(it) },
+                        onInactiveClick = {
+                            showToolsMenu = false
+                            onShowCapabilityChooser(capReasoning)
+                        },
+                    )
+                    CapabilityToggleItem(
+                        label = "Speculative decoding",
+                        icon = Icons.Default.Speed,
+                        active = capSpecDec in loadedModelCapabilities,
+                        checked = speculativeDecodingEnabled && capSpecDec in loadedModelCapabilities,
+                        onCheckedChange = { onSpeculativeDecodingToggle(it) },
+                        onInactiveClick = {
+                            showToolsMenu = false
+                            onShowCapabilityChooser(capSpecDec)
+                        },
+                    )
+                    CapabilityToggleItem(
+                        label = "Agent skills",
+                        icon = Icons.Default.Build,
+                        active = capAgent in loadedModelCapabilities,
+                        checked = agentSkillsEnabled && capAgent in loadedModelCapabilities,
+                        onCheckedChange = { isOn ->
+                            onAgentSkillsToggle(isOn)
+                            if (isOn) {
+                                showToolsMenu = false
+                                onOpenSkillManager()
+                            }
+                        },
+                        onInactiveClick = {
+                            showToolsMenu = false
+                            onShowCapabilityChooser(capAgent)
+                        },
+                    )
+                    // Web Search: always active — it augments the prompt and so
+                    // works with every model, current or future.
+                    CapabilityToggleItem(
+                        label = "Web search",
+                        icon = Icons.Default.TravelExplore,
+                        active = true,
+                        checked = webSearchEnabled,
+                        onCheckedChange = { onWebSearchToggle(it) },
+                        onInactiveClick = {},
+                    )
+                    HorizontalDivider()
                     DropdownMenuItem(
                         text = { Text("Prompt Library") },
                         leadingIcon = {
@@ -2317,8 +3058,10 @@ fun ChatInputArea(
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = onInputChange,
-                    modifier = Modifier.weight(1f),
-                    placeholder = { 
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("chat_input"),
+                    placeholder = {
                         Text(
                             when {
                                 isLoading -> "Processing..."
@@ -2348,7 +3091,8 @@ fun ChatInputArea(
                     }
                 )
 
-                // Microphone icon next to image icon, matching the requested composer layout.
+                // Phase 2 (§3.4 / §4.1): right-side row is now `[mic] [send|stop]`.
+                // The image button moved into the `+` menu's "Add image" entry.
                 IconButton(
                     onClick = {
                         if (isListening) onMicStop() else onMicClick()
@@ -2367,27 +3111,6 @@ fun ChatInputArea(
                     )
                 }
 
-                IconButton(
-                    onClick = onImageSelect,
-                    enabled = isEnabled && !isGenerating && !isLoading
-                ) {
-                    Icon(
-                        Icons.Default.Image,
-                        contentDescription = "Attach image",
-                        tint = if (isEnabled && !isGenerating && !isLoading) {
-                            if (hasImages) {
-                                MaterialTheme.colorScheme.primary
-                            } else if (isVisionSupported) {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                            }
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                        }
-                    )
-                }
-                
                 if (isGenerating || isLoading) {
                     IconButton(onClick = onStop) {
                         Icon(
@@ -2399,12 +3122,13 @@ fun ChatInputArea(
                 } else {
                     IconButton(
                         onClick = onSend,
-                        enabled = isEnabled && (inputText.isNotBlank() || hasImages)
+                        enabled = isEnabled && (inputText.isNotBlank() || hasAttachments),
+                        modifier = Modifier.testTag("chat_send")
                     ) {
                         Icon(
                             Icons.Default.Send,
                             contentDescription = "Send",
-                            tint = if (isEnabled && (inputText.isNotBlank() || hasImages)) {
+                            tint = if (isEnabled && (inputText.isNotBlank() || hasAttachments)) {
                                 MaterialTheme.colorScheme.primary
                             } else {
                                 MaterialTheme.colorScheme.onSurfaceVariant
@@ -2413,6 +3137,142 @@ fun ChatInputArea(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Phase 2 (§3.4 / §4.1): capability-aware row inside the composer `+` menu.
+ *
+ * Rendered "greyed-but-tappable" when [active] is false: the [DropdownMenuItem]
+ * stays enabled (Material 3 swallows the click otherwise) but icon + label use
+ * reduced alpha and a trailing "ⓘ" hint indicates that tapping opens a chooser
+ * listing models that *do* support the capability.
+ */
+@Composable
+private fun CapabilityMenuItem(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    active: Boolean,
+    onActiveClick: () -> Unit,
+    onInactiveClick: () -> Unit,
+) {
+    val alpha by animateFloatAsState(
+        targetValue = if (active) 1f else 0.5f,
+        animationSpec = tween(durationMillis = 300),
+        label = "capability_alpha",
+    )
+    DropdownMenuItem(
+        text = {
+            Text(
+                text = label,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha)
+            )
+        },
+        leadingIcon = {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)
+            )
+        },
+        trailingIcon = if (!active) {
+            {
+                Icon(
+                    imageVector = Icons.Default.Info,
+                    contentDescription = "No loaded model supports this — tap to choose one",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        } else null,
+        onClick = { if (active) onActiveClick() else onInactiveClick() },
+    )
+}
+
+@Composable
+private fun CapabilityToggleItem(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    active: Boolean,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    onInactiveClick: () -> Unit,
+) {
+    val alpha by animateFloatAsState(
+        targetValue = if (active) 1f else 0.5f,
+        animationSpec = tween(durationMillis = 300),
+        label = "capability_toggle_alpha",
+    )
+    DropdownMenuItem(
+        text = {
+            Text(
+                text = label,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha)
+            )
+        },
+        leadingIcon = {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)
+            )
+        },
+        trailingIcon = {
+            if (active) {
+                Checkbox(checked = checked, onCheckedChange = null)
+            } else {
+                Icon(
+                    imageVector = Icons.Default.Info,
+                    contentDescription = "No loaded model supports this — tap to choose one",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        },
+        onClick = {
+            if (active) onCheckedChange(!checked) else onInactiveClick()
+        },
+    )
+}
+
+@Composable
+private fun AgentSkillsChipStrip(
+    skillNames: List<String>,
+    onOpenManager: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val maxVisible = 3
+    val visible = skillNames.take(maxVisible)
+    val overflow = (skillNames.size - maxVisible).coerceAtLeast(0)
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable { onOpenManager() },
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Build,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                text = buildString {
+                    append(visible.joinToString(separator = " · "))
+                    if (overflow > 0) append(" · +$overflow more")
+                },
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -2444,6 +3304,9 @@ fun GenerationStatsDialog(
                     color = MaterialTheme.colorScheme.primary
                 )
                 StatsRow(label = "Generation Time", value = stats.formatGenerationTime())
+                if (stats.timeToFirstTokenMs > 0) {
+                    StatsRow(label = "Time to First Token", value = stats.formatTimeToFirstToken())
+                }
                 StatsRow(label = "Speed", value = stats.formatTokensPerSecond())
                 
                 Divider(modifier = Modifier.padding(vertical = 4.dp))
@@ -3073,6 +3936,53 @@ fun SelectedImagesPreview(
 }
 
 /**
+ * Preview strip for audio attachments queued via Audio Scribe.
+ */
+@Composable
+fun SelectedAudioPreview(
+    audioPaths: List<String>,
+    onRemoveAudio: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier) {
+        audioPaths.forEach { audioPath ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    Icons.Default.AudioFile,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = File(audioPath).name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(
+                    onClick = { onRemoveAudio(audioPath) },
+                    modifier = Modifier.size(20.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "Remove audio",
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
  * Grid display for images in message bubbles
  */
 @Composable
@@ -3157,35 +4067,9 @@ fun MessageImageGrid(
     }
 }
 
-/**
- * Fix [2.7]: productivity prompt templates as chips (alongside vision quick actions in the chat screen).
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ProductivityTemplateQuickBar(
-    selectedTemplate: PromptTemplate?,
-    onSelectTemplate: (PromptTemplate) -> Unit
-) {
-    val chips = listOf(PromptTemplates.TODO_LIST, PromptTemplates.MEETING_NOTES)
-    Surface(tonalElevation = 1.dp) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            chips.forEach { template ->
-                val active = selectedTemplate?.id == template.id
-                FilterChip(
-                    selected = active,
-                    onClick = { onSelectTemplate(template) },
-                    label = { Text(template.name) }
-                )
-            }
-        }
-    }
-}
+// Phase 2 (§3.4): ProductivityTemplateQuickBar removed per spec. The TODO_LIST
+// and MEETING_NOTES templates are still selectable from the prompt library
+// inside the `+` menu via PromptTemplates registry.
 
 /**
  * Quick action buttons for common vision tasks

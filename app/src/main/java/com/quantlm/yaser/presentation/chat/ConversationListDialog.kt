@@ -8,7 +8,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -64,7 +64,7 @@ fun ConversationHistoryDrawerContent(
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     IconButton(onClick = onOpenSystemLogs) {
-                        Icon(Icons.Default.List, contentDescription = "System logs")
+                        Icon(Icons.Default.Build, contentDescription = "System logs")
                     }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")

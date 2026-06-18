@@ -2,12 +2,15 @@ package com.quantlm.yaser.presentation.modernui
 
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.navigation.NavController
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import com.quantlm.yaser.presentation.Screen
 import com.quantlm.yaser.presentation.appsettings.AppSettingsScreen
 import com.quantlm.yaser.presentation.chat.ChatScreen
@@ -19,6 +22,21 @@ import com.quantlm.yaser.presentation.settings.SettingsViewModel
 @Composable
 fun ModernMainScreen() {
     val navController = rememberNavController()
+
+    // Log every nav-graph destination change exactly once per transition. One
+    // hook covers every existing and future route, so we never miss a screen
+    // change in the diagnostic transcript.
+    DisposableEffect(navController) {
+        val listener = NavController.OnDestinationChangedListener { _, destination, arguments ->
+            AppEventLogger.info(
+                component = "Navigation",
+                action = "destination_changed",
+                details = "route=${destination.route ?: "<no-route>"}, args=${arguments?.keySet()?.joinToString(",") ?: "none"}"
+            )
+        }
+        navController.addOnDestinationChangedListener(listener)
+        onDispose { navController.removeOnDestinationChangedListener(listener) }
+    }
 
     NavHost(
         navController = navController,

@@ -1,5 +1,7 @@
 package com.quantlm.yaser.domain.model
 
+import com.quantlm.yaser.data.local.GenerationPreferences.HardwareAccelerationMode
+
 data class ModelConfig(
     val name: String,
     val filePath: String,
@@ -14,5 +16,12 @@ data class ModelConfig(
     val systemPrompt: String = "",
     // Vision model support
     val isVisionModel: Boolean = false,
-    val mmprojPath: String? = null
+    val mmprojPath: String? = null,
+    // User-selected hardware accelerator (GPU/CPU) resolved from settings at
+    // load time. Null when no preference has been read yet — engines then fall
+    // back to their prior nGpuLayers-driven / device-default behavior.
+    val accelerationMode: HardwareAccelerationMode? = null,
+    // When true, bypasses the Gemma-4 CPU lock so GPU is attempted. Opt-in
+    // escape hatch — Gemma-4 GPU init crashes natively on many devices.
+    val gemma4GpuOverride: Boolean = false
 )

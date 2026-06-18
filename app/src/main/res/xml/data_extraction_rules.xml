@@ -1,19 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+   Backup / device-transfer rules for API 31+. Everything not excluded is
+   included. See backup_rules.xml (the API <= 30 twin) for the rationale of
+   each exclude; the two files must be kept in sync.
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <exclude domain="file" path="models" />
+        <exclude domain="file" path="diagnostics" />
+        <exclude domain="file" path="datastore" />
+        <exclude domain="sharedpref" path="huggingface_auth.xml" />
+        <exclude domain="sharedpref" path="quantlm_lock_state.xml" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <exclude domain="file" path="models" />
+        <exclude domain="file" path="diagnostics" />
+        <exclude domain="file" path="datastore" />
+        <exclude domain="sharedpref" path="huggingface_auth.xml" />
+        <exclude domain="sharedpref" path="quantlm_lock_state.xml" />
     </device-transfer>
-    -->
 </data-extraction-rules>

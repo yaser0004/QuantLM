@@ -125,7 +125,7 @@ fun OnboardingScreen(
                 OnboardingPage(
                     icon = Icons.Default.Celebration,
                     title = "You're All Set!",
-                    description = "Start by downloading an AI model from the Models tab. Smaller models like SmolVLM 256M or SmolLM3 Q4 are great for getting started quickly."
+                    description = "Start by downloading an AI model from the Models tab. SmolLM3 Q4 or Phi-4 Mini Q4 are great for getting started quickly."
                 )
             )
         }

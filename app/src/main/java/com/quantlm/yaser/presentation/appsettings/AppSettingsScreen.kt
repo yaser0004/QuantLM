@@ -38,6 +38,7 @@ fun AppSettingsScreen(
     onNavigateBack: () -> Unit,
     viewModel: AppSettingsViewModel = hiltViewModel()
 ) {
+    com.quantlm.yaser.presentation.util.LogScreenLifecycle("AppSettingsScreen")
     val appLockEnabled by viewModel.appLockEnabled.collectAsState()
     val appLockType by viewModel.appLockType.collectAsState()
     val biometricEnabled by viewModel.biometricEnabled.collectAsState()

@@ -5,8 +5,11 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import com.quantlm.yaser.data.diagnostics.AppEventLogger
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 
 private val Context.appSettingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "app_settings")
 
@@ -40,7 +43,12 @@ class AppPreferences(private val context: Context) {
         // Theme settings
         private val THEME_MODE = stringPreferencesKey("theme_mode")
         private val THEME_COLOR_SOURCE = stringPreferencesKey("theme_color_source")
-        
+
+        // Diagnostics export counter — incremented every time the user
+        // taps "Save to device" in the System Logs screen. Persisted so it
+        // survives app restarts (so log-N stays monotonic across sessions).
+        private val LOGS_EXPORT_COUNT = intPreferencesKey("logs_export_count")
+
         // Defaults
         const val DEFAULT_LOCK_TIMEOUT = 60 // 1 minute
     }
@@ -69,7 +77,31 @@ class AppPreferences(private val context: Context) {
         CRIMSON_ORCHID("crimson_orchid", "Crimson Orchid"),
         CLAY_CYAN("clay_cyan", "Clay Cyan"),
         FOREST_MOSS("forest_moss", "Forest Moss"),
-        SAGE_STONE("sage_stone", "Sage Stone")
+        SAGE_STONE("sage_stone", "Sage Stone"),
+        // Image 1 – pastel duos
+        SOFT_LAVENDER("soft_lavender", "Lavender"),
+        BUBBLEGUM("bubblegum", "Bubblegum"),
+        PEACH_TANGERINE("peach_tangerine", "Peach Tangerine"),
+        MINT_LIME("mint_lime", "Mint Lime"),
+        SKY_TEAL("sky_teal", "Sky Teal"),
+        BLUE_LAVENDER("blue_lavender", "Blue Lavender"),
+        ROSE_BLUSH("rose_blush", "Rose Blush"),
+        // Image 2 – muted pastels
+        WARM_SAND("warm_sand", "Warm Sand"),
+        SAGE_MIST("sage_mist", "Sage Mist"),
+        DUSTY_LAVENDER("dusty_lavender", "Dusty Lavender"),
+        SOFT_SAGE("soft_sage", "Soft Sage"),
+        PERIWINKLE("periwinkle", "Periwinkle"),
+        OLIVE_GROVE("olive_grove", "Olive"),
+        POWDER_BLUE("powder_blue", "Powder Blue"),
+        // Image 3 – bright pastels
+        SALMON("salmon", "Salmon"),
+        BLUSH("blush", "Blush"),
+        APRICOT("apricot", "Apricot"),
+        AMBER("amber", "Amber"),
+        APPLE_GREEN("apple_green", "Apple Green"),
+        CORNFLOWER("cornflower", "Cornflower"),
+        LILAC("lilac", "Lilac")
     }
     
     /**
@@ -146,25 +178,23 @@ class AppPreferences(private val context: Context) {
     
     suspend fun setPin(pin: String) {
         context.appSettingsDataStore.edit { preferences ->
-            // Store hashed PIN for security and PIN length for UI
-            preferences[APP_LOCK_PIN] = hashCode(pin)
+            // Store salted-KDF hash (see CredentialHasher) and PIN length for UI
+            preferences[APP_LOCK_PIN] = CredentialHasher.hash(pin)
             preferences[APP_LOCK_PIN_LENGTH] = pin.length
         }
         AppEventLogger.info(component = TAG, action = "set_pin", details = "pinLength=${pin.length}")
     }
-    
+
     suspend fun setPassword(password: String) {
         context.appSettingsDataStore.edit { preferences ->
-            // Store hashed password for security
-            preferences[APP_LOCK_PASSWORD] = hashCode(password)
+            preferences[APP_LOCK_PASSWORD] = CredentialHasher.hash(password)
         }
         AppEventLogger.info(component = TAG, action = "set_password", details = "passwordLength=${password.length}")
     }
-    
+
     suspend fun setPattern(pattern: String) {
         context.appSettingsDataStore.edit { preferences ->
-            // Store hashed pattern for security
-            preferences[APP_LOCK_PATTERN] = hashCode(pattern)
+            preferences[APP_LOCK_PATTERN] = CredentialHasher.hash(pattern)
         }
         AppEventLogger.info(component = TAG, action = "set_pattern", details = "patternLength=${pattern.length}")
     }
@@ -183,22 +213,37 @@ class AppPreferences(private val context: Context) {
         AppEventLogger.info(component = TAG, action = "set_lock_timeout", details = "seconds=$seconds")
     }
     
-    fun verifyPin(pin: String): Flow<Boolean> {
-        return context.appSettingsDataStore.data.map { preferences ->
-            preferences[APP_LOCK_PIN] == hashCode(pin)
+    suspend fun verifyPin(pin: String): Boolean = verifyCredential(APP_LOCK_PIN, pin)
+
+    suspend fun verifyPassword(password: String): Boolean =
+        verifyCredential(APP_LOCK_PASSWORD, password)
+
+    suspend fun verifyPattern(pattern: String): Boolean =
+        verifyCredential(APP_LOCK_PATTERN, pattern)
+
+    /**
+     * Verify [input] against the stored hash for [key]. Runs on
+     * [Dispatchers.Default] — 150k PBKDF2 rounds are deliberately slow and
+     * must not run on the Main thread. On a successful match against a legacy
+     * unsalted SHA-256 value, the stored hash is transparently re-written in
+     * the salted v2 format, so the weak hash leaves disk at the user's next
+     * successful unlock without any reset or lockout.
+     */
+    private suspend fun verifyCredential(
+        key: Preferences.Key<String>,
+        input: String
+    ): Boolean = withContext(Dispatchers.Default) {
+        val stored = context.appSettingsDataStore.data.first()[key] ?: return@withContext false
+        val ok = CredentialHasher.matches(input, stored)
+        if (ok && CredentialHasher.isLegacy(stored)) {
+            context.appSettingsDataStore.edit { it[key] = CredentialHasher.hash(input) }
+            AppEventLogger.info(
+                component = TAG,
+                action = "credential_hash_upgraded",
+                details = "key=${key.name}"
+            )
         }
-    }
-    
-    fun verifyPassword(password: String): Flow<Boolean> {
-        return context.appSettingsDataStore.data.map { preferences ->
-            preferences[APP_LOCK_PASSWORD] == hashCode(password)
-        }
-    }
-    
-    fun verifyPattern(pattern: String): Flow<Boolean> {
-        return context.appSettingsDataStore.data.map { preferences ->
-            preferences[APP_LOCK_PATTERN] == hashCode(pattern)
-        }
+        ok
     }
     
     fun getStoredPin(): Flow<String?> {
@@ -245,21 +290,7 @@ class AppPreferences(private val context: Context) {
     }
     
     // ========== Utility Methods ==========
-    
-    /**
-     * Simple hash function for storing credentials securely.
-     * In production, use a proper crypto library with salt.
-     */
-    private fun hashCode(input: String): String {
-        return try {
-            val md = java.security.MessageDigest.getInstance("SHA-256")
-            val digest = md.digest(input.toByteArray())
-            digest.fold("") { str, byte -> str + "%02x".format(byte) }
-        } catch (e: Exception) {
-            input.hashCode().toString()
-        }
-    }
-    
+
     /**
      * Clear all app lock credentials
      */
@@ -283,5 +314,32 @@ class AppPreferences(private val context: Context) {
             preferences.clear()
         }
         AppEventLogger.warn(component = TAG, action = "reset_all_preferences")
+    }
+
+    // ========== Diagnostics export counter ==========
+
+    /**
+     * Atomically increment the diagnostics-export counter and return the
+     * new value. Used by the "Save to device" button in System Logs so each
+     * saved Markdown file carries a monotonic log number (log-1, log-2, …)
+     * across the lifetime of the install.
+     */
+    suspend fun nextLogsExportNumber(): Int {
+        var next = 1
+        context.appSettingsDataStore.edit { preferences ->
+            next = (preferences[LOGS_EXPORT_COUNT] ?: 0) + 1
+            preferences[LOGS_EXPORT_COUNT] = next
+        }
+        AppEventLogger.info(
+            component = TAG,
+            action = "logs_export_counter_incremented",
+            details = "next=$next"
+        )
+        return next
+    }
+
+    /** Read-only view of the current export counter. */
+    fun observeLogsExportCount(): Flow<Int> {
+        return context.appSettingsDataStore.data.map { it[LOGS_EXPORT_COUNT] ?: 0 }
     }
 }

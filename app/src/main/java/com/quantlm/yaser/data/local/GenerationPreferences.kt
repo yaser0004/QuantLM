@@ -37,10 +37,23 @@ class GenerationPreferences(private val context: Context) {
         private val MIROSTAT_ETA = floatPreferencesKey("mirostat_eta")
         private val STOP_SEQUENCES = stringPreferencesKey("stop_sequences")
         private val ADVANCED_INFERENCE_ENABLED = booleanPreferencesKey("advanced_inference_enabled")
+        // Phase 2 (§3.6 / §3.7 / §3.9): persisted capability toggles surfaced by
+        // the chat composer's `+` menu. All default to `false` so the user opts
+        // in explicitly; existing reads without these keys continue to work.
+        private val ENABLE_THINKING = booleanPreferencesKey("enable_thinking")
+        private val ENABLE_SPECULATIVE_DECODING = booleanPreferencesKey("enable_speculative_decoding")
+        private val ENABLE_AGENT_SKILLS = booleanPreferencesKey("enable_agent_skills")
+        // Web Search toggle: when true, every message is answered using freshly
+        // scraped web context. Defaults to false — fully offline until opted in.
+        private val ENABLE_WEB_SEARCH = booleanPreferencesKey("enable_web_search")
         private val CONTEXT_LENGTH = intPreferencesKey("context_length")
         private val CPU_THREADS = intPreferencesKey("cpu_threads")
         private val GPU_LAYERS = intPreferencesKey("gpu_layers")
         private val HARDWARE_ACCELERATION_MODE = stringPreferencesKey("hardware_acceleration_mode")
+        // Opt-in escape hatch: Gemma-4 models are CPU-locked because GPU init can
+        // trigger an uncatchable native crash on many devices. When true, that
+        // lock is bypassed so the user can try GPU at their own risk.
+        private val GEMMA4_GPU_OVERRIDE = booleanPreferencesKey("gemma4_gpu_override")
         private val SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
         private val TTS_VOICE_GENDER = stringPreferencesKey("tts_voice_gender")
         private val TTS_VOICE_PROFILE = stringPreferencesKey("tts_voice_profile")
@@ -50,7 +63,7 @@ class GenerationPreferences(private val context: Context) {
         
         // Defaults
         const val DEFAULT_TEMPERATURE = 0.7f
-        const val DEFAULT_MAX_TOKENS = 512  // Higher default to avoid mid-sentence cutoffs
+        const val DEFAULT_MAX_TOKENS = 2048  // Headroom for long-form answers; history budgeting still trims if context fills.
         const val DEFAULT_TOP_P = 0.9f
         const val DEFAULT_TOP_K = 40
         const val DEFAULT_REPEAT_PENALTY = 1.1f
@@ -94,14 +107,33 @@ class GenerationPreferences(private val context: Context) {
         val stopSequences: List<String> = emptyList(),
         val isAdvancedInferenceEnabled: Boolean = false,
         val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
-        val ttsVoiceProfile: TtsVoiceProfile = TtsVoiceProfile.CLASSIC_LEGACY
+        val ttsVoiceProfile: TtsVoiceProfile = TtsVoiceProfile.CLASSIC_LEGACY,
+        // Phase 2 (§3.6): chain-of-thought / `<think>` toggle. Plumbed through
+        // [LoadOptions.enableThinking] at load time; runtime detection
+        // (`LlamaEngine.nativeChatTemplateSupportsThinking`) gates whether the
+        // model honors it.
+        val enableThinking: Boolean = false,
+        // Phase 2 (§3.7): metadata-only capability toggle today (no runtime path
+        // for llama.cpp draft models yet — see Phase 1 §1.4 TODO). Persisted so
+        // the UI state survives reloads.
+        val enableSpeculativeDecoding: Boolean = false,
+        // Phase 2 (§3.9): when true and the active model carries
+        // [ModelCapability.AGENT_SKILLS], the system prompt is augmented with
+        // the skill manifest at send time.
+        val enableAgentSkills: Boolean = false,
+        // Web Search: when true, [SendMessageUseCase] fetches and injects web
+        // context for every message. When false the app never touches the
+        // network for chat. Works with every model (prompt-level augmentation).
+        val enableWebSearch: Boolean = false,
     )
 
     data class HardwareSettings(
         val contextLength: Int = DEFAULT_CONTEXT_LENGTH,
         val cpuThreads: Int = DEFAULT_CPU_THREADS,
         val gpuLayers: Int = DEFAULT_GPU_LAYERS,
-        val accelerationMode: HardwareAccelerationMode = HardwareAccelerationMode.GPU
+        val accelerationMode: HardwareAccelerationMode = HardwareAccelerationMode.GPU,
+        // Bypasses the Gemma-4 CPU lock when true. Off by default.
+        val gemma4GpuOverride: Boolean = false,
     )
     
     suspend fun saveSettings(settings: GenerationSettings) {
@@ -122,6 +154,10 @@ class GenerationPreferences(private val context: Context) {
             preferences[ADVANCED_INFERENCE_ENABLED] = settings.isAdvancedInferenceEnabled
             preferences[SYSTEM_PROMPT] = settings.systemPrompt
             preferences[TTS_VOICE_PROFILE] = settings.ttsVoiceProfile.storageValue
+            preferences[ENABLE_THINKING] = settings.enableThinking
+            preferences[ENABLE_SPECULATIVE_DECODING] = settings.enableSpeculativeDecoding
+            preferences[ENABLE_AGENT_SKILLS] = settings.enableAgentSkills
+            preferences[ENABLE_WEB_SEARCH] = settings.enableWebSearch
         }
         AppEventLogger.info(
             component = TAG,
@@ -178,7 +214,11 @@ class GenerationPreferences(private val context: Context) {
                 ttsVoiceProfile = TtsVoiceProfile.fromStorage(
                     preferences[TTS_VOICE_PROFILE],
                     preferences[TTS_VOICE_GENDER]
-                )
+                ),
+                enableThinking = preferences[ENABLE_THINKING] ?: false,
+                enableSpeculativeDecoding = preferences[ENABLE_SPECULATIVE_DECODING] ?: false,
+                enableAgentSkills = preferences[ENABLE_AGENT_SKILLS] ?: false,
+                enableWebSearch = preferences[ENABLE_WEB_SEARCH] ?: false,
             )
         }
     }
@@ -217,7 +257,8 @@ class GenerationPreferences(private val context: Context) {
                 contextLength = preferences[CONTEXT_LENGTH] ?: DEFAULT_CONTEXT_LENGTH,
                 cpuThreads = preferences[CPU_THREADS] ?: defaultCpuThreads,
                 gpuLayers = resolvedGpuLayers,
-                accelerationMode = accelerationMode
+                accelerationMode = accelerationMode,
+                gemma4GpuOverride = preferences[GEMMA4_GPU_OVERRIDE] ?: false,
             )
         }
     }
@@ -351,6 +392,17 @@ class GenerationPreferences(private val context: Context) {
         )
     }
 
+    suspend fun saveGemma4GpuOverride(value: Boolean) {
+        context.settingsDataStore.edit { preferences ->
+            preferences[GEMMA4_GPU_OVERRIDE] = value
+        }
+        AppEventLogger.info(
+            component = TAG,
+            action = "save_gemma4_gpu_override",
+            details = "value=$value"
+        )
+    }
+
     suspend fun saveSystemPrompt(value: String) {
         context.settingsDataStore.edit { preferences ->
             preferences[SYSTEM_PROMPT] = value
@@ -363,5 +415,25 @@ class GenerationPreferences(private val context: Context) {
             preferences[TTS_VOICE_PROFILE] = profile.storageValue
         }
         AppEventLogger.info(component = TAG, action = "save_tts_voice_profile", details = "profile=${profile.storageValue}")
+    }
+
+    suspend fun saveEnableThinking(value: Boolean) {
+        context.settingsDataStore.edit { it[ENABLE_THINKING] = value }
+        AppEventLogger.info(component = TAG, action = "save_enable_thinking", details = "value=$value")
+    }
+
+    suspend fun saveEnableSpeculativeDecoding(value: Boolean) {
+        context.settingsDataStore.edit { it[ENABLE_SPECULATIVE_DECODING] = value }
+        AppEventLogger.info(component = TAG, action = "save_enable_speculative_decoding", details = "value=$value")
+    }
+
+    suspend fun saveEnableAgentSkills(value: Boolean) {
+        context.settingsDataStore.edit { it[ENABLE_AGENT_SKILLS] = value }
+        AppEventLogger.info(component = TAG, action = "save_enable_agent_skills", details = "value=$value")
+    }
+
+    suspend fun saveEnableWebSearch(value: Boolean) {
+        context.settingsDataStore.edit { it[ENABLE_WEB_SEARCH] = value }
+        AppEventLogger.info(component = TAG, action = "save_enable_web_search", details = "value=$value")
     }
 }

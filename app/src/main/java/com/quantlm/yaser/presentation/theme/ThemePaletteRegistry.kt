@@ -219,6 +219,408 @@ object ThemePaletteRegistry {
                 secondary = Color(0xFF6D8772),
                 tertiary = Color(0xFF88AE95)
             )
+        ),
+        // ── Image 1: pastel duos ──────────────────────────────────────────
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.SOFT_LAVENDER,
+            label = "Lavender",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF7060B8),
+                bottomStart = Color(0xFFB0A0F0),
+                bottomEnd = Color(0xFF9080D0)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF7060B8),
+                secondary = Color(0xFF9080D0),
+                tertiary = Color(0xFFB0A0F0)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF7060B8),
+                secondary = Color(0xFF9080D0),
+                tertiary = Color(0xFFB0A0F0)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.BUBBLEGUM,
+            label = "Bubblegum",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFFC050A8),
+                bottomStart = Color(0xFFF090D8),
+                bottomEnd = Color(0xFFE070C0)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFFC050A8),
+                secondary = Color(0xFFE070C0),
+                tertiary = Color(0xFFF090D8)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFFC050A8),
+                secondary = Color(0xFFE070C0),
+                tertiary = Color(0xFFF090D8)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.PEACH_TANGERINE,
+            label = "Peach Tangerine",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFFD08030),
+                bottomStart = Color(0xFFF8C870),
+                bottomEnd = Color(0xFFF0A060)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFFD08030),
+                secondary = Color(0xFFF0A060),
+                tertiary = Color(0xFFF8C870)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFFD08030),
+                secondary = Color(0xFFF0A060),
+                tertiary = Color(0xFFF8C870)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.MINT_LIME,
+            label = "Mint Lime",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF48A840),
+                bottomStart = Color(0xFF80D870),
+                bottomEnd = Color(0xFFC8C830)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF48A840),
+                secondary = Color(0xFF80D870),
+                tertiary = Color(0xFFC8C830)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF48A840),
+                secondary = Color(0xFF80D870),
+                tertiary = Color(0xFFC8C830)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.SKY_TEAL,
+            label = "Sky Teal",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF2898A8),
+                bottomStart = Color(0xFF78D0E8),
+                bottomEnd = Color(0xFF50C090)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF2898A8),
+                secondary = Color(0xFF50C090),
+                tertiary = Color(0xFF78D0E8)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF2898A8),
+                secondary = Color(0xFF50C090),
+                tertiary = Color(0xFF78D0E8)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.BLUE_LAVENDER,
+            label = "Blue Lavender",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF5868C8),
+                bottomStart = Color(0xFFB8C0F0),
+                bottomEnd = Color(0xFF8898D8)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF5868C8),
+                secondary = Color(0xFF8898D8),
+                tertiary = Color(0xFFB8C0F0)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF5868C8),
+                secondary = Color(0xFF8898D8),
+                tertiary = Color(0xFFB8C0F0)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.ROSE_BLUSH,
+            label = "Rose Blush",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFFC06090),
+                bottomStart = Color(0xFFF0B8D8),
+                bottomEnd = Color(0xFFE090C0)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFFC06090),
+                secondary = Color(0xFFE090C0),
+                tertiary = Color(0xFFF0B8D8)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFFC06090),
+                secondary = Color(0xFFE090C0),
+                tertiary = Color(0xFFF0B8D8)
+            )
+        ),
+        // ── Image 2: muted pastels ────────────────────────────────────────
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.WARM_SAND,
+            label = "Warm Sand",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF807055),
+                bottomStart = Color(0xFFC0BAA0),
+                bottomEnd = Color(0xFFA89070)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF807055),
+                secondary = Color(0xFFA89070),
+                tertiary = Color(0xFFC0BAA0)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF807055),
+                secondary = Color(0xFFA89070),
+                tertiary = Color(0xFFC0BAA0)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.SAGE_MIST,
+            label = "Sage Mist",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF507870),
+                bottomStart = Color(0xFFA8BEB8),
+                bottomEnd = Color(0xFF789898)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF507870),
+                secondary = Color(0xFF789898),
+                tertiary = Color(0xFFA8BEB8)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF507870),
+                secondary = Color(0xFF789898),
+                tertiary = Color(0xFFA8BEB8)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.DUSTY_LAVENDER,
+            label = "Dusty Lavender",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF706080),
+                bottomStart = Color(0xFFC0B8D8),
+                bottomEnd = Color(0xFF9888A8)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF706080),
+                secondary = Color(0xFF9888A8),
+                tertiary = Color(0xFFC0B8D8)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF706080),
+                secondary = Color(0xFF9888A8),
+                tertiary = Color(0xFFC0B8D8)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.SOFT_SAGE,
+            label = "Soft Sage",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF508040),
+                bottomStart = Color(0xFFA8C888),
+                bottomEnd = Color(0xFF78A860)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF508040),
+                secondary = Color(0xFF78A860),
+                tertiary = Color(0xFFA8C888)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF508040),
+                secondary = Color(0xFF78A860),
+                tertiary = Color(0xFFA8C888)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.PERIWINKLE,
+            label = "Periwinkle",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF5858A0),
+                bottomStart = Color(0xFFA8A8D8),
+                bottomEnd = Color(0xFF8080B8)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF5858A0),
+                secondary = Color(0xFF8080B8),
+                tertiary = Color(0xFFA8A8D8)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF5858A0),
+                secondary = Color(0xFF8080B8),
+                tertiary = Color(0xFFA8A8D8)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.OLIVE_GROVE,
+            label = "Olive",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF6B7818),
+                bottomStart = Color(0xFFB8CA48),
+                bottomEnd = Color(0xFF909830)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF6B7818),
+                secondary = Color(0xFF909830),
+                tertiary = Color(0xFFB8CA48)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF6B7818),
+                secondary = Color(0xFF909830),
+                tertiary = Color(0xFFB8CA48)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.POWDER_BLUE,
+            label = "Powder Blue",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF4878B0),
+                bottomStart = Color(0xFFA8C0E8),
+                bottomEnd = Color(0xFF7898C8)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF4878B0),
+                secondary = Color(0xFF7898C8),
+                tertiary = Color(0xFFA8C0E8)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF4878B0),
+                secondary = Color(0xFF7898C8),
+                tertiary = Color(0xFFA8C0E8)
+            )
+        ),
+        // ── Image 3: bright pastels ───────────────────────────────────────
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.SALMON,
+            label = "Salmon",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFFB85860),
+                bottomStart = Color(0xFFF0A0A8),
+                bottomEnd = Color(0xFFD87880)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFFB85860),
+                secondary = Color(0xFFD87880),
+                tertiary = Color(0xFFF0A0A8)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFFB85860),
+                secondary = Color(0xFFD87880),
+                tertiary = Color(0xFFF0A0A8)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.BLUSH,
+            label = "Blush",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFFB86868),
+                bottomStart = Color(0xFFF0B0B0),
+                bottomEnd = Color(0xFFD88888)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFFB86868),
+                secondary = Color(0xFFD88888),
+                tertiary = Color(0xFFF0B0B0)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFFB86868),
+                secondary = Color(0xFFD88888),
+                tertiary = Color(0xFFF0B0B0)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.APRICOT,
+            label = "Apricot",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFFC07030),
+                bottomStart = Color(0xFFF8B880),
+                bottomEnd = Color(0xFFE09060)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFFC07030),
+                secondary = Color(0xFFE09060),
+                tertiary = Color(0xFFF8B880)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFFC07030),
+                secondary = Color(0xFFE09060),
+                tertiary = Color(0xFFF8B880)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.AMBER,
+            label = "Amber",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFFA07818),
+                bottomStart = Color(0xFFD8B040),
+                bottomEnd = Color(0xFFC09028)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFFA07818),
+                secondary = Color(0xFFC09028),
+                tertiary = Color(0xFFD8B040)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFFA07818),
+                secondary = Color(0xFFC09028),
+                tertiary = Color(0xFFD8B040)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.APPLE_GREEN,
+            label = "Apple Green",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF508030),
+                bottomStart = Color(0xFF90C870),
+                bottomEnd = Color(0xFF70A840)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF508030),
+                secondary = Color(0xFF70A840),
+                tertiary = Color(0xFF90C870)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF508030),
+                secondary = Color(0xFF70A840),
+                tertiary = Color(0xFF90C870)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.CORNFLOWER,
+            label = "Cornflower",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF4060B8),
+                bottomStart = Color(0xFF90B8F0),
+                bottomEnd = Color(0xFF6888D0)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF4060B8),
+                secondary = Color(0xFF6888D0),
+                tertiary = Color(0xFF90B8F0)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF4060B8),
+                secondary = Color(0xFF6888D0),
+                tertiary = Color(0xFF90B8F0)
+            )
+        ),
+        ThemePaletteOption(
+            source = AppPreferences.ThemeColorSource.LILAC,
+            label = "Lilac",
+            buttonColors = ThemePaletteButtonColors(
+                top = Color(0xFF6848B8),
+                bottomStart = Color(0xFFC0A8F0),
+                bottomEnd = Color(0xFF9070D0)
+            ),
+            lightScheme = makeLightScheme(
+                primary = Color(0xFF6848B8),
+                secondary = Color(0xFF9070D0),
+                tertiary = Color(0xFFC0A8F0)
+            ),
+            darkScheme = makeDarkScheme(
+                primary = Color(0xFF6848B8),
+                secondary = Color(0xFF9070D0),
+                tertiary = Color(0xFFC0A8F0)
+            )
         )
     )
 

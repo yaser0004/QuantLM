@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -51,7 +52,9 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.quantlm.yaser.data.diagnostics.LogExporter
 import com.quantlm.yaser.data.diagnostics.SystemLogDiagnostics
+import com.quantlm.yaser.data.local.AppPreferences
 import com.quantlm.yaser.presentation.models.ModelsViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -67,6 +70,7 @@ fun ModernSystemLogsScreen(
     onNavigateBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    com.quantlm.yaser.presentation.util.LogScreenLifecycle("SystemLogsScreen")
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val contentScrollState = rememberScrollState()
@@ -78,6 +82,11 @@ fun ModernSystemLogsScreen(
     // Start disabled to avoid disorienting jump-to-bottom on initial screen open.
     var followTailEnabled by remember { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
+    var isSavingExport by remember { mutableStateOf(false) }
+    // AppPreferences holds nothing but a Context handle — safe to construct per
+    // screen entry rather than dragging Hilt into a screen that otherwise has
+    // no ViewModel.
+    val appPreferences = remember(context.applicationContext) { AppPreferences(context.applicationContext) }
 
     suspend fun refreshLogsOnce() {
         if (isRefreshing) return
@@ -139,6 +148,40 @@ fun ModernSystemLogsScreen(
                             Icon(
                                 Icons.Default.ContentCopy,
                                 contentDescription = "Copy logs"
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                if (isSavingExport) return@IconButton
+                                scope.launch {
+                                    isSavingExport = true
+                                    try {
+                                        val number = appPreferences.nextLogsExportNumber()
+                                        LogExporter.saveMarkdown(context.applicationContext, number)
+                                            .onSuccess { result ->
+                                                Toast.makeText(
+                                                    context,
+                                                    "Saved to Downloads/QuantLM_Logs as ${result.displayName}",
+                                                    Toast.LENGTH_LONG
+                                                ).show()
+                                            }
+                                            .onFailure { err ->
+                                                Toast.makeText(
+                                                    context,
+                                                    "Save failed: ${err.message ?: err.javaClass.simpleName}",
+                                                    Toast.LENGTH_LONG
+                                                ).show()
+                                            }
+                                    } finally {
+                                        isSavingExport = false
+                                    }
+                                }
+                            },
+                            enabled = !isSavingExport
+                        ) {
+                            Icon(
+                                Icons.Default.SaveAlt,
+                                contentDescription = "Save logs to device"
                             )
                         }
                         IconButton(
@@ -271,6 +314,7 @@ fun ModernModelBenchmarkScreen(
     modifier: Modifier = Modifier,
     modelsViewModel: ModelsViewModel = hiltViewModel()
 ) {
+    com.quantlm.yaser.presentation.util.LogScreenLifecycle("BenchmarkScreen")
     val loadedModel by modelsViewModel.loadedModel.collectAsState()
     val modelLoadingState by modelsViewModel.modelLoadingState.collectAsState()
 

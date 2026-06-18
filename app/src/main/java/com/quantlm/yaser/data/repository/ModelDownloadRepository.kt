@@ -5,11 +5,13 @@ import android.util.Log
 import com.quantlm.yaser.data.notification.DownloadNotificationManager
 import com.quantlm.yaser.domain.model.DownloadState
 import com.quantlm.yaser.domain.model.DownloadableModel
+import com.quantlm.yaser.domain.model.isVisionModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -64,12 +66,20 @@ class ModelDownloadRepository @Inject constructor(
      * Fetch file size from server via HTTP HEAD request.
      * Returns the Content-Length or -1 if unavailable.
      * Public for pre-fetching sizes before download.
+     *
+     * Bug fix: this issues a blocking OkHttp call (`Call.execute()`). It is a
+     * `suspend` function, but `suspend` alone does NOT move work off the
+     * caller's thread — callers such as [ModelDownloadViewModel.fetchModelSize]
+     * invoke it from `viewModelScope` (the Main dispatcher), so the network
+     * call ran on the UI thread and threw `NetworkOnMainThreadException`.
+     * Forcing [Dispatchers.IO] here guarantees the HEAD request never touches
+     * the main thread regardless of the caller's dispatcher.
      */
-    suspend fun getRemoteFileSize(url: String): Long {
+    suspend fun getRemoteFileSize(url: String): Long = withContext(Dispatchers.IO) {
         // Check cache first
-        fileSizeCache[url]?.let { return it }
-        
-        return try {
+        fileSizeCache[url]?.let { return@withContext it }
+
+        try {
             val request = Request.Builder()
                 .url(url)
                 .head()
@@ -77,18 +87,18 @@ class ModelDownloadRepository @Inject constructor(
                 .addHeader("Accept", "*/*")
                 .build()
             val response = client.newCall(request).execute()
-            
+
             // Check if request was successful
             if (!response.isSuccessful) {
                 Log.w(TAG, "HEAD request failed for $url: HTTP ${response.code}")
                 response.close()
-                return -1L
+                return@withContext -1L
             }
-            
+
             val contentLength = response.header("Content-Length")?.toLongOrNull() ?: -1L
             response.close()
             Log.d(TAG, "Remote file size for $url: $contentLength bytes")
-            
+
             // Cache the result if valid
             if (contentLength > 0) {
                 fileSizeCache[url] = contentLength

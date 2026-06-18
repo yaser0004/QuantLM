@@ -33,4 +33,6 @@ interface ChatRepository {
     suspend fun updateMessage(message: Message)
 
     suspend fun deleteMessagesAfter(conversationId: Long, afterMessageId: Long)
+
+    suspend fun insertModelChangeMarker(conversationId: Long, newModelName: String)
 }

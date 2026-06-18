@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import com.quantlm.yaser.presentation.ui.common.ClickableLink
 import com.quantlm.yaser.presentation.ui.common.ModernGradientHeader
 import androidx.compose.ui.unit.dp
@@ -23,6 +24,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.quantlm.yaser.domain.model.DownloadState
 import com.quantlm.yaser.domain.model.ModelInfo
 import com.quantlm.yaser.domain.model.ModelLoadingState
+import com.quantlm.yaser.domain.model.isVisionModel
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -33,6 +35,7 @@ fun ModelsScreen(
     onNavigateBack: (() -> Unit)? = null,
     useModernChrome: Boolean = false
 ) {
+    com.quantlm.yaser.presentation.util.LogScreenLifecycle("ModelsScreen")
     val downloadViewModel: ModelDownloadViewModel = hiltViewModel()
     val availableModels by viewModel.availableModels.collectAsState()
     val loadedModel by viewModel.loadedModel.collectAsState()
@@ -82,14 +85,16 @@ fun ModelsScreen(
                     contentColor = MaterialTheme.colorScheme.primary
                 ) {
                     Tab(
+                        modifier = Modifier.testTag("tab_local_models"),
                         selected = selectedTab == 0,
                         onClick = { selectedTab = 0 },
                         text = { Text("Local Models") }
                     )
                     Tab(
+                        modifier = Modifier.testTag("tab_get_models"),
                         selected = selectedTab == 1,
                         onClick = { selectedTab = 1 },
-                        text = { Text("Download") }
+                        text = { Text("Get Models") }
                     )
                 }
             }
@@ -269,7 +274,7 @@ fun LocalModelsTab(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        text = "Download models from the Download tab",
+                        text = "Download models from the Get Models tab",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -367,7 +372,7 @@ fun LocalModelsTab(
                             Text("Capabilities:", style = MaterialTheme.typography.titleSmall)
                         }
                         item("capabilities") {
-                            Text(dlModel.capabilities, style = MaterialTheme.typography.bodySmall)
+                            Text(dlModel.capabilitiesText, style = MaterialTheme.typography.bodySmall)
                         }
                         item("recommended_header") {
                             Divider()

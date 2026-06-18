@@ -7,7 +7,6 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -54,9 +53,12 @@ class AppLockManager @Inject constructor(
         object Unsupported : BiometricStatus()
     }
     
-    // Track failed attempts for lockout
-    private var failedAttempts = 0
-    private var lockoutUntil = 0L
+    private val lockoutPrefs = context.getSharedPreferences("quantlm_lock_state", Context.MODE_PRIVATE)
+
+    // Track failed attempts for lockout; persisted so a process restart
+    // (e.g. via ADB force-stop) cannot reset the counter mid-attack.
+    private var failedAttempts = lockoutPrefs.getInt("failed_attempts", 0)
+    private var lockoutUntil = lockoutPrefs.getLong("lockout_until", 0L)
     private val maxFailedAttempts = 5
     private val lockoutDuration = 30_000L // 30 seconds
     
@@ -221,7 +223,7 @@ class AppLockManager @Inject constructor(
             return AuthResult.Failure("Too many attempts. Try again in $remaining seconds")
         }
         
-        val isValid = appPreferences.verifyPin(pin).first()
+        val isValid = appPreferences.verifyPin(pin)
         return if (isValid) {
             resetFailedAttempts()
             AppEventLogger.info(component = TAG, action = "verify_pin_succeeded")
@@ -242,7 +244,7 @@ class AppLockManager @Inject constructor(
             return AuthResult.Failure("Too many attempts. Try again in $remaining seconds")
         }
         
-        val isValid = appPreferences.verifyPassword(password).first()
+        val isValid = appPreferences.verifyPassword(password)
         return if (isValid) {
             resetFailedAttempts()
             AppEventLogger.info(component = TAG, action = "verify_password_succeeded")
@@ -263,7 +265,7 @@ class AppLockManager @Inject constructor(
             return AuthResult.Failure("Too many attempts. Try again in $remaining seconds")
         }
         
-        val isValid = appPreferences.verifyPattern(pattern).first()
+        val isValid = appPreferences.verifyPattern(pattern)
         return if (isValid) {
             resetFailedAttempts()
             AppEventLogger.info(component = TAG, action = "verify_pattern_succeeded")
@@ -381,26 +383,32 @@ class AppLockManager @Inject constructor(
         failedAttempts++
         val remaining = maxFailedAttempts - failedAttempts
         AppEventLogger.warn(component = TAG, action = "auth_failed_attempt_recorded", details = "remainingAttempts=$remaining")
-        
+
         if (remaining <= 0) {
             lockoutUntil = System.currentTimeMillis() + lockoutDuration
             failedAttempts = 0
+            lockoutPrefs.edit()
+                .putInt("failed_attempts", 0)
+                .putLong("lockout_until", lockoutUntil)
+                .apply()
             AppEventLogger.warn(component = TAG, action = "auth_lockout_started", details = "durationMs=$lockoutDuration")
             return AuthResult.Failure(
                 "Too many failed attempts. Locked for 30 seconds.",
                 0
             )
         }
-        
+
+        lockoutPrefs.edit().putInt("failed_attempts", failedAttempts).apply()
         return AuthResult.Failure(
             "Incorrect. $remaining attempts remaining.",
             remaining
         )
     }
-    
+
     private fun resetFailedAttempts() {
         failedAttempts = 0
         lockoutUntil = 0L
+        lockoutPrefs.edit().putInt("failed_attempts", 0).putLong("lockout_until", 0L).apply()
     }
     
     /**

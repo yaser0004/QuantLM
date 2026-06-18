@@ -2,6 +2,7 @@ package com.quantlm.yaser.presentation.models
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import com.quantlm.yaser.domain.model.ModelInfo
 import com.quantlm.yaser.domain.model.ModelLoadingState
 import com.quantlm.yaser.domain.repository.ModelRepository
@@ -18,6 +19,10 @@ import javax.inject.Inject
 class ModelsViewModel @Inject constructor(
     private val modelRepository: ModelRepository
 ) : ViewModel() {
+
+    private companion object {
+        const val TAG = "ModelsViewModel"
+    }
     
     private val _availableModels = MutableStateFlow<List<ModelInfo>>(emptyList())
     val availableModels = _availableModels.asStateFlow()
@@ -39,40 +44,69 @@ class ModelsViewModel @Inject constructor(
     }
     
     fun refreshModels() {
+        AppEventLogger.info(component = TAG, action = "refresh_models_requested")
         viewModelScope.launch {
             _isLoading.value = true
             try {
                 val models = modelRepository.getAvailableModels()
                 _availableModels.value = models
+                AppEventLogger.info(
+                    component = TAG,
+                    action = "refresh_models_complete",
+                    details = "count=${models.size}"
+                )
             } catch (e: Exception) {
                 _errorMessage.value = e.message
+                AppEventLogger.error(
+                    component = TAG,
+                    action = "refresh_models_failed",
+                    details = "reason=${e.message ?: "unknown"}",
+                    throwable = e
+                )
             } finally {
                 _isLoading.value = false
             }
         }
     }
-    
+
     fun deleteModel(filePath: String) {
+        AppEventLogger.info(component = TAG, action = "delete_model_requested", details = "path=$filePath")
         viewModelScope.launch {
             modelRepository.deleteModel(filePath).onSuccess {
+                AppEventLogger.info(component = TAG, action = "delete_model_success", details = "path=$filePath")
                 refreshModels()
             }.onFailure {
                 _errorMessage.value = it.message
+                AppEventLogger.error(
+                    component = TAG,
+                    action = "delete_model_failed",
+                    details = "path=$filePath, reason=${it.message ?: "unknown"}",
+                    throwable = it
+                )
             }
         }
     }
 
     fun unloadModel() {
+        AppEventLogger.info(component = TAG, action = "unload_model_requested")
         viewModelScope.launch {
             try {
                 modelRepository.unloadModel()
+                AppEventLogger.info(component = TAG, action = "unload_model_success")
             } catch (e: Exception) {
                 _errorMessage.value = e.message
+                AppEventLogger.error(
+                    component = TAG,
+                    action = "unload_model_failed",
+                    details = "reason=${e.message ?: "unknown"}",
+                    throwable = e
+                )
             }
         }
     }
-    
+
     fun clearError() {
+        AppEventLogger.debug(component = TAG, action = "clear_error")
         _errorMessage.value = null
     }
 }

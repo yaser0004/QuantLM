@@ -4,12 +4,14 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import com.quantlm.yaser.data.repository.ModelDownloadRepository
 import com.quantlm.yaser.data.worker.WorkManagerDownloadRepository
 import com.quantlm.yaser.data.worker.WorkManagerDownloadStatus
 import com.quantlm.yaser.domain.model.AvailableModels
 import com.quantlm.yaser.domain.model.DownloadState
 import com.quantlm.yaser.domain.model.DownloadableModel
+import com.quantlm.yaser.domain.model.isVisionModel
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -74,8 +76,11 @@ class ModelDownloadViewModel @Inject constructor(
         restoreActiveDownloadStates()
         prefetchAllModelSizes()
         
-        // Clean up stale download entries from previous app sessions
-        workManagerRepo.cleanupStaleDownloads()
+        // Clean up stale download entries from previous app sessions.
+        // Suspend: it queries WorkManager with blocking futures (now on IO).
+        viewModelScope.launch {
+            workManagerRepo.cleanupStaleDownloads()
+        }
         
         Log.i(TAG, "ViewModel initialized with WorkManager-only architecture")
     }
@@ -309,11 +314,17 @@ class ModelDownloadViewModel @Inject constructor(
      * If nothing is downloading, the download starts immediately.
      */
     fun enqueueDownload(model: DownloadableModel, onSuccess: () -> Unit = {}) {
+        AppEventLogger.info(
+            component = TAG,
+            action = "enqueue_download",
+            details = "id=${model.id}, name=${model.name}, sizeMb=${model.fileSize / (1024 * 1024)}"
+        )
         val isActivelyDownloading = _downloadStates.value.values
             .any { it is DownloadState.Downloading }
 
         if (isActivelyDownloading) {
             Log.i(TAG, "Queuing download for ${model.name}")
+            AppEventLogger.info(component = TAG, action = "download_queued", details = "id=${model.id}")
             downloadQueue.add(Pair(model, onSuccess))
             _queuedModelIds.value = _queuedModelIds.value + model.id
             _downloadStates.value = _downloadStates.value.toMutableMap().apply {
@@ -343,16 +354,19 @@ class ModelDownloadViewModel @Inject constructor(
         // Check if already downloading
         if (workManagerRepo.isDownloadInProgress(model.id)) {
             Log.i(TAG, "Download already in progress for ${model.name}, skipping")
+            AppEventLogger.warn(component = TAG, action = "download_skipped_already_running", details = "id=${model.id}")
             return
         }
-        
+
         val currentState = _downloadStates.value[model.id]
         if (currentState is DownloadState.Downloading) {
             Log.i(TAG, "Download already in progress (from state) for ${model.name}, skipping")
+            AppEventLogger.warn(component = TAG, action = "download_skipped_state_says_running", details = "id=${model.id}")
             return
         }
-        
+
         Log.i(TAG, "Starting WorkManager download for ${model.name}")
+        AppEventLogger.info(component = TAG, action = "download_start", details = "id=${model.id}, name=${model.name}")
         
         // Store callback
         pendingCallbacks[model.id] = onSuccess
@@ -371,12 +385,14 @@ class ModelDownloadViewModel @Inject constructor(
         // the LiveData observer in observeWorkerProgress(), and having two paths
         // causes conflicting updates where stale StateFlow values overwrite
         // fresh callback values, making the UI appear frozen.
-        workManagerRepo.downloadModel(
-            model = model,
-            accessToken = model.accessToken
-        ) { status ->
-            val downloadState = workManagerRepo.toDownloadState(status, totalBytes)
-            handleDownloadStateUpdate(model.id, downloadState)
+        viewModelScope.launch {
+            workManagerRepo.downloadModel(
+                model = model,
+                accessToken = model.accessToken
+            ) { status ->
+                val downloadState = workManagerRepo.toDownloadState(status, totalBytes)
+                handleDownloadStateUpdate(model.id, downloadState)
+            }
         }
     }
     
@@ -411,33 +427,35 @@ class ModelDownloadViewModel @Inject constructor(
             put(mmprojId, DownloadState.Downloading(0f, 0L, model.mmprojFileSize))
         }
         
-        workManagerRepo.downloadModel(
-            model = mmprojModel,
-            accessToken = model.accessToken
-        ) { status ->
-            val downloadState = workManagerRepo.toDownloadState(status, model.mmprojFileSize)
-            
-            _downloadStates.value = _downloadStates.value.toMutableMap().apply {
-                put(mmprojId, downloadState)
-            }
-            
-            when (status) {
-                is WorkManagerDownloadStatus.Succeeded -> {
-                    Log.i(TAG, "Mmproj download complete for ${model.name}")
-                    _completionMessage.value = "✓ Vision support downloaded for ${model.name}!"
-                    viewModelScope.launch {
-                        delay(5000)
-                        _completionMessage.value = null
+        viewModelScope.launch {
+            workManagerRepo.downloadModel(
+                model = mmprojModel,
+                accessToken = model.accessToken
+            ) { status ->
+                val downloadState = workManagerRepo.toDownloadState(status, model.mmprojFileSize)
+
+                _downloadStates.value = _downloadStates.value.toMutableMap().apply {
+                    put(mmprojId, downloadState)
+                }
+
+                when (status) {
+                    is WorkManagerDownloadStatus.Succeeded -> {
+                        Log.i(TAG, "Mmproj download complete for ${model.name}")
+                        _completionMessage.value = "✓ Vision support downloaded for ${model.name}!"
+                        viewModelScope.launch {
+                            delay(5000)
+                            _completionMessage.value = null
+                        }
+                        refreshDownloadedModels()
+                        pendingCallbacks[mmprojId]?.invoke()
+                        pendingCallbacks.remove(mmprojId)
                     }
-                    refreshDownloadedModels()
-                    pendingCallbacks[mmprojId]?.invoke()
-                    pendingCallbacks.remove(mmprojId)
+                    is WorkManagerDownloadStatus.Failed -> {
+                        Log.e(TAG, "Mmproj download failed: ${status.errorMessage}")
+                        pendingCallbacks.remove(mmprojId)
+                    }
+                    else -> {}
                 }
-                is WorkManagerDownloadStatus.Failed -> {
-                    Log.e(TAG, "Mmproj download failed: ${status.errorMessage}")
-                    pendingCallbacks.remove(mmprojId)
-                }
-                else -> {}
             }
         }
     }
@@ -447,21 +465,23 @@ class ModelDownloadViewModel @Inject constructor(
      */
     fun cancelDownload(model: DownloadableModel) {
         Log.i(TAG, "Cancelling download for ${model.name}")
-        
+        AppEventLogger.info(component = TAG, action = "download_cancel", details = "id=${model.id}, name=${model.name}")
+
         workManagerRepo.cancelDownload(model.id)
         pendingCallbacks.remove(model.id)
-        
+
         _downloadStates.value = _downloadStates.value.toMutableMap().apply {
             put(model.id, DownloadState.Cancelled)
         }
     }
-    
+
     /**
      * Retry a stuck or failed download.
      * Cancels existing work, cleans up, and restarts.
      */
     fun retryDownload(model: DownloadableModel, onSuccess: () -> Unit = {}) {
         Log.i(TAG, "Retrying download for ${model.name}")
+        AppEventLogger.info(component = TAG, action = "download_retry", details = "id=${model.id}, name=${model.name}")
         
         // Clear error/cancelled state
         _downloadStates.value = _downloadStates.value.toMutableMap().apply {
@@ -477,12 +497,14 @@ class ModelDownloadViewModel @Inject constructor(
         }
         
         // Single source of truth: callback from observeWorkerProgress
-        workManagerRepo.retryDownload(
-            model = model,
-            accessToken = model.accessToken
-        ) { status ->
-            val downloadState = workManagerRepo.toDownloadState(status, totalBytes)
-            handleDownloadStateUpdate(model.id, downloadState)
+        viewModelScope.launch {
+            workManagerRepo.retryDownload(
+                model = model,
+                accessToken = model.accessToken
+            ) { status ->
+                val downloadState = workManagerRepo.toDownloadState(status, totalBytes)
+                handleDownloadStateUpdate(model.id, downloadState)
+            }
         }
     }
     
@@ -491,14 +513,17 @@ class ModelDownloadViewModel @Inject constructor(
      */
     fun deleteModel(model: DownloadableModel) {
         Log.i(TAG, "Deleting model: ${model.name}")
+        AppEventLogger.info(component = TAG, action = "delete_downloaded_model", details = "id=${model.id}, name=${model.name}")
         if (modelRepository.deleteDownloadedModel(model)) {
             _downloadedModels.value = _downloadedModels.value - model.id
             _downloadStates.value = _downloadStates.value.toMutableMap().apply {
                 remove(model.id)
             }
             Log.i(TAG, "Model deleted successfully")
+            AppEventLogger.info(component = TAG, action = "delete_downloaded_model_success", details = "id=${model.id}")
         } else {
             Log.w(TAG, "Failed to delete model")
+            AppEventLogger.warn(component = TAG, action = "delete_downloaded_model_failed", details = "id=${model.id}")
         }
     }
     

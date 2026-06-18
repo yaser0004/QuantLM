@@ -1,20 +1,29 @@
 package com.quantlm.yaser.data.inference
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
 import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import com.quantlm.yaser.data.inference.LlamaEngine.StreamCallback
+import com.quantlm.yaser.data.local.GenerationPreferences.HardwareAccelerationMode
 import com.quantlm.yaser.domain.inference.GenerationParams
 import com.quantlm.yaser.domain.inference.InferenceConfig
 import com.quantlm.yaser.domain.inference.InferenceEngine
+import com.quantlm.yaser.domain.inference.LoadOptions
+import com.quantlm.yaser.domain.inference.SamplingCapabilities
+import com.quantlm.yaser.domain.inference.SamplingParam
+import com.quantlm.yaser.domain.model.ModelCapability
 import com.quantlm.yaser.domain.model.ModelFormat
+import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.tasks.genai.llminference.GraphOptions
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
 import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession.LlmInferenceSessionOptions
 import com.google.mediapipe.tasks.genai.llminference.ProgressListener
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -31,11 +40,8 @@ import javax.inject.Singleton
  * 
  * Supported models from HuggingFace LiteRT Community:
  * - litert-community/Gemma3-1B-IT
- * - google/gemma-3n-E2B-it-litert-lm
- * - google/gemma-3n-E4B-it-litert-lm
  * - litert-community/Qwen2.5-1.5B-Instruct
  * - litert-community/Phi-4-mini-instruct
- * - litert-community/DeepSeek-R1-Distill-Qwen-1.5B
  * 
  * @see <a href="https://ai.google.dev/edge/mediapipe/solutions/genai/llm_inference/android">MediaPipe LLM Inference</a>
  */
@@ -49,13 +55,35 @@ class MediaPipeEngine @Inject constructor(
         private const val DEFAULT_MAX_TOKENS = 4096
         private const val MIN_FALLBACK_TOKENS = 128
         private const val DEFAULT_TOP_K = 40
+
+        /** Longest edge an attached image is downsampled to before encoding. */
+        private const val MAX_IMAGE_DIMENSION = 1024
+
+        /** Max images a vision session may hold across a conversation. */
+        private const val MAX_IMAGES = 8
+
+        /**
+         * Safety interlock for [supportsAudioInput]. Audio must not be
+         * advertised until generateWithAudio() actually calls a real SDK audio
+         * API — otherwise the recording is silently dropped. Flip to true in
+         * the same change that wires the audio call path.
+         */
+        private const val AUDIO_CALL_PATH_WIRED = false
     }
     
     override val supportedFormat: ModelFormat = ModelFormat.TFLITE
+
+    // The MediaPipe SDK honors only temperature / topK / topP.
+    override val samplingCapabilities: Set<SamplingParam> = SamplingCapabilities.BASIC
     
     private var llmInference: LlmInference? = null
     private var currentSession: LlmInferenceSession? = null
     private var modelPath: String? = null
+    @Volatile
+    private var loadedContextSize: Int = 0
+
+    fun getLoadedContextSize(): Int = loadedContextSize
+
     
     @Volatile
     private var _isModelLoaded = false
@@ -68,15 +96,71 @@ class MediaPipeEngine @Inject constructor(
         get() = _isGenerating
     
     private val shouldStop = AtomicBoolean(false)
+
+    /**
+     * Serializes the session-touching generation calls ([generate],
+     * [generateStream], [generateWithImage]). A MediaPipe [LlmInferenceSession]
+     * permits only one in-flight invocation at a time; without this lock a new
+     * turn — even one started in a freshly created conversation — could call
+     * addQueryChunk()/generateResponseAsync() before the previous invocation's
+     * future had resolved, which the SDK rejects with "Previous invocation
+     * still processing". The lock is held until generateResponse()/future.get()
+     * returns, i.e. until the persistent session is genuinely idle again.
+     */
+    private val generationMutex = Mutex()
     
-    // Vision is not yet fully supported via this engine
-    // Gemma 3n models have native vision but require special handling
+    // True when a vision-capable model is loaded and image input is wired
+    // (see [generateWithImage] / [visionEnabled]).
     @Volatile
     private var _supportsVision = false
     override val supportsVision: Boolean
         get() = _supportsVision
     
     private var modelName: String? = null
+
+    /**
+     * Phase 1 (Subphase F): persistent-session sampling options.
+     *
+     * MediaPipe's [LlmInferenceSession] owns the KV cache for a conversation.
+     * We keep the session alive across [generate]/[generateStream] calls and
+     * only rebuild it when sampling options change or [resetConversation] is
+     * called — that's what lets multi-turn coherence work without re-prefilling
+     * every turn.
+     */
+    private data class SessionParams(
+        val temperature: Float,
+        val topK: Int,
+        val topP: Float,
+    )
+    @Volatile
+    private var currentSessionParams: SessionParams? = null
+
+    /**
+     * The accelerator the caller asked for at load time. Wired into
+     * [LlmInference.LlmInferenceOptions.Builder.setPreferredBackend] in
+     * [tryLoadWithMaxTokens] so the MediaPipe runtime actually honors the
+     * GPU/CPU selection, and surfaced by [getActiveBackendLabel].
+     */
+    @Volatile
+    private var loadedAccelerator: HardwareAccelerationMode? = null
+
+    /**
+     * Set when a GPU load exhausted the token ladder and the model was
+     * recovered on the CPU backend (see [loadModel]). Surfaced by
+     * [getActiveBackendLabel] so the UI distinguishes an automatic fallback
+     * from a user-chosen CPU load.
+     */
+    @Volatile
+    private var gpuFellBackToCpu = false
+
+    /**
+     * Whether the loaded model is vision-capable and the engine/session were
+     * configured for image input. Decided from the filename at load time —
+     * before the token ladder runs — so it can gate the [LlmInference] and
+     * [LlmInferenceSession] options.
+     */
+    @Volatile
+    private var visionEnabled = false
     
     /**
      * Detect expected context size from model filename.
@@ -153,10 +237,15 @@ class MediaPipeEngine @Inject constructor(
     override suspend fun loadModel(
         modelPath: String,
         config: InferenceConfig
-    ): Result<Unit> = withContext(Dispatchers.IO) {
+    ): Result<Unit> = withContext(Dispatchers.IO + InferenceThreadDiscipline.inferencePriority()) {
         try {
+            // Capture the requested accelerator before unloadModel() clears it,
+            // then restore it so tryLoadWithMaxTokens can steer the backend.
+            // Null here (a bare 2-param call) preserves the device-default path.
+            val requestedAccelerator = loadedAccelerator
             // Unload any existing model
             unloadModel()
+            loadedAccelerator = requestedAccelerator
             
             val modelFile = File(modelPath)
             if (!modelFile.exists()) {
@@ -166,6 +255,10 @@ class MediaPipeEngine @Inject constructor(
                 )
             }
             
+            // Decided here — before the token ladder — so tryLoadWithMaxTokens
+            // and ensureSession can configure image input.
+            visionEnabled = isVisionCapableModel(modelFile.name) && supportsVisionInput()
+
             Log.i(TAG, "Loading MediaPipe LLM model: $modelPath")
             Log.i(TAG, "File size: ${modelFile.length()} bytes (${modelFile.length() / (1024*1024)} MB)")
             Log.i(TAG, "File extension: ${modelFile.extension}")
@@ -203,6 +296,25 @@ class MediaPipeEngine @Inject constructor(
                 lastFailure = loadResult.exceptionOrNull()
             }
             
+            // GPU→CPU fallback: if every GPU token-ladder attempt failed,
+            // retry once on CPU at the smallest token count. A single attempt
+            // (not the whole ladder again) keeps a failed load from doubling
+            // in duration.
+            if (loadResult.isFailure && loadedAccelerator == HardwareAccelerationMode.GPU) {
+                Log.w(TAG, "All GPU load attempts failed; retrying once on CPU backend")
+                AppEventLogger.warn(
+                    component = TAG,
+                    action = "model_load_gpu_fallback",
+                    details = "path=$modelPath, fallbackTokens=$MIN_FALLBACK_TOKENS"
+                )
+                loadedAccelerator = HardwareAccelerationMode.CPU
+                gpuFellBackToCpu = true
+                loadResult = tryLoadWithMaxTokens(modelPath, MIN_FALLBACK_TOKENS)
+                if (loadResult.isFailure) {
+                    lastFailure = loadResult.exceptionOrNull()
+                }
+            }
+
             if (loadResult.isFailure) {
                 val detailed = summarizeThrowable(lastFailure)
                 Log.e(
@@ -227,8 +339,9 @@ class MediaPipeEngine @Inject constructor(
             this@MediaPipeEngine.modelName = modelFile.nameWithoutExtension
             _isModelLoaded = true
             
-            // Check if model supports vision based on model name
-            _supportsVision = isVisionCapableModel(modelFile.name)
+            // visionEnabled was decided before the token ladder ran; the
+            // engine and sessions are already configured to match.
+            _supportsVision = visionEnabled
             
             Log.i(TAG, "MediaPipe LLM model loaded successfully: ${modelFile.name}")
             Log.i(TAG, "Vision support: $_supportsVision")
@@ -257,19 +370,30 @@ class MediaPipeEngine @Inject constructor(
             Result.failure(IllegalStateException(userMessage, t))
         }
     }
-    
+
     /**
      * Attempt to load a model with a specific maxTokens value.
      */
     private fun tryLoadWithMaxTokens(modelPath: String, maxTokens: Int): Result<Unit> {
         return try {
-            Log.i(TAG, "Attempting load with maxTokens=$maxTokens, modelPath=$modelPath")
-            val options = LlmInference.LlmInferenceOptions.builder()
+            val backend = when (loadedAccelerator) {
+                HardwareAccelerationMode.GPU -> LlmInference.Backend.GPU
+                HardwareAccelerationMode.CPU -> LlmInference.Backend.CPU
+                null -> LlmInference.Backend.DEFAULT
+            }
+            Log.w(TAG, "GPUDIAG MediaPipe.tryLoad: loadedAccelerator=$loadedAccelerator, backend=$backend")
+            Log.i(TAG, "Attempting load with maxTokens=$maxTokens, backend=$backend, modelPath=$modelPath")
+            val optionsBuilder = LlmInference.LlmInferenceOptions.builder()
                 .setModelPath(modelPath)
                 .setMaxTokens(maxTokens)
-                .build()
+                .setPreferredBackend(backend)
+            if (visionEnabled) {
+                optionsBuilder.setMaxNumImages(MAX_IMAGES)
+            }
+            val options = optionsBuilder.build()
             
             llmInference = LlmInference.createFromOptions(context, options)
+            loadedContextSize = maxTokens
             Log.i(TAG, "Successfully loaded with maxTokens=$maxTokens")
             AppEventLogger.debug(
                 component = TAG,
@@ -297,15 +421,28 @@ class MediaPipeEngine @Inject constructor(
         modelPath: String,
         mmprojPath: String,
         config: InferenceConfig
-    ): Result<Unit> = withContext(Dispatchers.IO) {
-        // MediaPipe vision models are single files, no separate projector needed
-        // Just load the model and enable vision mode
-        val result = loadModel(modelPath, config)
-        if (result.isSuccess) {
-            _supportsVision = true
-            Log.i(TAG, "Vision model loaded with vision support enabled")
-        }
-        result
+    ): Result<Unit> {
+        // MediaPipe `.task` vision models are single-file (no separate
+        // projector). loadModel() detects vision capability from the filename
+        // and configures the engine and sessions for image input.
+        return loadModel(modelPath, config)
+    }
+
+    /**
+     * Accelerator-aware vision load. Records the requested accelerator so the
+     * GPU/CPU choice from Settings is honored for `.task` vision models, then
+     * delegates to the 3-param [loadVisionModel]. Mirrors the 3-param
+     * [loadModel] override; not part of [InferenceEngine] — the repository
+     * holds a concrete [MediaPipeEngine] reference.
+     */
+    suspend fun loadVisionModel(
+        modelPath: String,
+        mmprojPath: String,
+        config: InferenceConfig,
+        options: LoadOptions,
+    ): Result<Unit> {
+        loadedAccelerator = options.accelerationMode
+        return loadVisionModel(modelPath, mmprojPath, config)
     }
     
     /**
@@ -328,6 +465,7 @@ class MediaPipeEngine @Inject constructor(
                 Log.w(TAG, "Error closing session during unload", e)
             }
             currentSession = null
+            currentSessionParams = null
             try {
                 llmInference?.close()
             } catch (e: Exception) {
@@ -336,6 +474,10 @@ class MediaPipeEngine @Inject constructor(
             llmInference = null
             modelPath = null
             modelName = null
+            loadedAccelerator = null
+            gpuFellBackToCpu = false
+            visionEnabled = false
+            loadedContextSize = 0
             _isModelLoaded = false
             _supportsVision = false
             Log.d(TAG, "MediaPipe LLM model unloaded")
@@ -345,17 +487,102 @@ class MediaPipeEngine @Inject constructor(
             AppEventLogger.error(component = TAG, action = "model_unload_failed", throwable = e)
         }
     }
+
+    /**
+     * Accelerator-aware load. Records the requested accelerator so
+     * [tryLoadWithMaxTokens] can pass it to MediaPipe via
+     * [LlmInference.LlmInferenceOptions.Builder.setPreferredBackend].
+     */
+    override suspend fun loadModel(
+        modelPath: String,
+        config: InferenceConfig,
+        options: LoadOptions,
+    ): Result<Unit> {
+        loadedAccelerator = options.accelerationMode
+        return loadModel(modelPath, config)
+    }
+
+    /**
+     * Honest active-backend label for the loaded model. Used by the repository
+     * layer to surface the actual runtime selection in diagnostics.
+     */
+    fun getActiveBackendLabel(): String {
+        if (!_isModelLoaded) return "Unknown"
+        return when (loadedAccelerator) {
+            HardwareAccelerationMode.CPU ->
+                if (gpuFellBackToCpu) "MediaPipe (CPU - GPU unavailable)" else "MediaPipe (CPU)"
+            HardwareAccelerationMode.GPU -> "MediaPipe (GPU)"
+            null -> "MediaPipe (device default)"
+        }
+    }
+
+    /**
+     * Phase 1 (Subphase F): ensure a session exists with sampling options
+     * matching [params]; rebuild if they don't. Sessions are reused across
+     * turns so the KV cache survives — this is what makes multi-turn chat
+     * coherent without re-prefilling history each call.
+     */
+    private fun ensureSession(params: GenerationParams): LlmInferenceSession? {
+        val inference = llmInference ?: return null
+        if (params.topK > 64) {
+            Log.i(TAG, "topK=${params.topK} exceeds the MediaPipe SDK maximum; clamped to 64")
+        }
+        val effective = SessionParams(
+            temperature = params.temperature,
+            topK = params.topK.coerceAtMost(64),
+            topP = params.topP,
+        )
+        val existing = currentSession
+        if (existing != null && currentSessionParams == effective) {
+            return existing
+        }
+        if (existing != null) {
+            try {
+                existing.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error closing stale session before rebuild", e)
+            }
+        }
+        return try {
+            val sessionBuilder = LlmInferenceSessionOptions.builder()
+                .setTemperature(effective.temperature)
+                .setTopK(effective.topK)
+                .setTopP(effective.topP)
+            if (visionEnabled) {
+                sessionBuilder.setGraphOptions(
+                    GraphOptions.builder().setEnableVisionModality(true).build()
+                )
+            }
+            val sessionOptions = sessionBuilder.build()
+            val fresh = LlmInferenceSession.createFromOptions(inference, sessionOptions)
+            currentSession = fresh
+            currentSessionParams = effective
+            AppEventLogger.debug(
+                component = TAG,
+                action = "session_rebuilt",
+                details = "temp=${effective.temperature}, topK=${effective.topK}, topP=${effective.topP}"
+            )
+            fresh
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create inference session", e)
+            currentSession = null
+            currentSessionParams = null
+            null
+        }
+    }
     
     override suspend fun generate(
         prompt: String,
         params: GenerationParams
-    ): String = withContext(Dispatchers.IO) {
-        val inference = llmInference
-            ?: throw IllegalStateException("No model loaded")
-        
+    ): String = withContext(Dispatchers.IO + InferenceThreadDiscipline.inferencePriority()) {
+        if (llmInference == null) throw IllegalStateException("No model loaded")
+
+        // Wait for any prior invocation to fully finish before touching the
+        // shared session; released in the finally below.
+        generationMutex.lock()
         _isGenerating = true
         shouldStop.set(false)
-        
+
         try {
             Log.d(TAG, "Generating response for prompt (${prompt.length} chars)")
             AppEventLogger.info(
@@ -363,48 +590,43 @@ class MediaPipeEngine @Inject constructor(
                 action = "generate_start",
                 details = "promptChars=${prompt.length}, maxTokens=${params.maxTokens}, temperature=${params.temperature}"
             )
-            
-            // Create a session for this generation
-            val sessionOptions = LlmInferenceSessionOptions.builder()
-                .setTemperature(params.temperature)
-                .setTopK(params.topK.coerceAtMost(64))
-                .setTopP(params.topP)
-                .build()
-            
-            val session = LlmInferenceSession.createFromOptions(inference, sessionOptions)
-            
-            try {
-                session.addQueryChunk(prompt)
-                val response = session.generateResponse()
-                Log.d(TAG, "Generated response: ${response.take(100)}...")
-                AppEventLogger.info(
-                    component = TAG,
-                    action = "generate_complete",
-                    details = "responseChars=${response.length}"
-                )
-                response
-            } finally {
-                session.close()
-            }
+
+            // Phase 1 (Subphase F): reuse the persistent session so KV carries
+            // across turns. The session is rebuilt only on sampling-options
+            // change or resetConversation()/unloadModel().
+            val session = ensureSession(params)
+                ?: throw IllegalStateException("Failed to acquire MediaPipe session")
+            session.addQueryChunk(prompt)
+            val response = session.generateResponse()
+            Log.d(TAG, "Generated response: ${response.take(100)}...")
+            AppEventLogger.info(
+                component = TAG,
+                action = "generate_complete",
+                details = "responseChars=${response.length}"
+            )
+            response
         } finally {
             _isGenerating = false
+            generationMutex.unlock()
         }
     }
-    
+
     override suspend fun generateStream(
         prompt: String,
         callback: StreamCallback,
         params: GenerationParams
-    ): Boolean = withContext(Dispatchers.IO) {
-        val inference = llmInference
-        if (inference == null) {
+    ): Boolean = withContext(Dispatchers.IO + InferenceThreadDiscipline.inferencePriority()) {
+        if (llmInference == null) {
             callback.onError("No model loaded")
             return@withContext false
         }
-        
+
+        // Wait for any prior invocation to fully finish before touching the
+        // shared session; released in the finally below.
+        generationMutex.lock()
         _isGenerating = true
         shouldStop.set(false)
-        
+
         try {
             Log.d(TAG, "Starting streaming generation for prompt (${prompt.length} chars)")
             AppEventLogger.info(
@@ -412,67 +634,62 @@ class MediaPipeEngine @Inject constructor(
                 action = "generate_stream_start",
                 details = "promptChars=${prompt.length}, maxTokens=${params.maxTokens}, temperature=${params.temperature}"
             )
-            
-            // Create session options
-            val sessionOptions = LlmInferenceSessionOptions.builder()
-                .setTemperature(params.temperature)
-                .setTopK(params.topK.coerceAtMost(64))
-                .setTopP(params.topP)
-                .build()
-            
-            // Create a new session
-            val session = try {
-                LlmInferenceSession.createFromOptions(inference, sessionOptions)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to create inference session", e)
-                callback.onError("Failed to create session: ${e.message}")
+
+            // Phase 1 (Subphase F): reuse the persistent session so MediaPipe's
+            // internal KV state carries across turns. Session is rebuilt only
+            // on sampling-options change or resetConversation().
+            val session = ensureSession(params)
+            if (session == null) {
+                callback.onError("Failed to acquire MediaPipe session")
                 return@withContext false
             }
-            currentSession = session
-            
+
             try {
-                // Add the prompt
                 session.addQueryChunk(prompt)
-                
+
                 // Track whether the listener already called onComplete
                 val completedViaListener = AtomicBoolean(false)
-                
-                // Create progress listener for streaming
+
                 val progressListener = ProgressListener<String> { partialResult, done ->
                     if (!shouldStop.get()) {
                         callback.onToken(partialResult)
-                        if (done) {
-                            completedViaListener.set(true)
-                            callback.onComplete()
-                        }
+                    }
+                    // Deliver completion even when stopped: suppressing it left
+                    // the consumer's callbackFlow open forever (leaked collector,
+                    // wake lock held until its timeout, stuck foreground service).
+                    if (done && completedViaListener.compareAndSet(false, true)) {
+                        callback.onComplete()
                     }
                 }
-                
-                // Generate with streaming via async API
+
                 val future = session.generateResponseAsync(progressListener)
-                
-                // Wait for completion - future.get() can throw even if
-                // ProgressListener already called onComplete(). Guard against this.
+
+                // future.get() can throw even after the listener completes;
+                // tolerate the race so we don't double-report failure. A
+                // cancelled turn (stopGeneration → cancelGenerateResponseAsync)
+                // may surface here as an exception OR resolve without ever
+                // delivering done.
                 try {
                     future.get()
                 } catch (e: Exception) {
-                    if (completedViaListener.get()) {
-                        // Listener already delivered the complete response
-                        Log.w(TAG, "future.get() threw after listener completed: ${e.message}")
-                    } else {
-                        // Genuine error - listener never completed
-                        throw e
+                    when {
+                        completedViaListener.get() ->
+                            Log.w(TAG, "future.get() threw after listener completed: ${e.message}")
+                        shouldStop.get() ->
+                            Log.i(TAG, "Generation cancelled: ${e.message}")
+                        else -> throw e
                     }
                 }
-                
+
+                // Whatever the cancel path did (done delivered, swallowed
+                // above, or resolved without done), the consumer's stream
+                // must terminate exactly once.
+                if (completedViaListener.compareAndSet(false, true)) {
+                    callback.onComplete()
+                }
+
                 !shouldStop.get()
             } finally {
-                try {
-                    session.close()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error closing session", e)
-                }
-                currentSession = null
                 AppEventLogger.info(
                     component = TAG,
                     action = "generate_stream_end",
@@ -481,6 +698,14 @@ class MediaPipeEngine @Inject constructor(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Streaming generation error", e)
+            // Session may be in a broken state — drop it so the next call rebuilds.
+            try {
+                currentSession?.close()
+            } catch (closeErr: Exception) {
+                Log.w(TAG, "Error closing session after stream failure", closeErr)
+            }
+            currentSession = null
+            currentSessionParams = null
             callback.onError(e.message ?: "Unknown error")
             AppEventLogger.error(
                 component = TAG,
@@ -491,34 +716,153 @@ class MediaPipeEngine @Inject constructor(
             false
         } finally {
             _isGenerating = false
+            generationMutex.unlock()
         }
     }
-    
+
     override suspend fun generateWithImage(
         prompt: String,
         imagePath: String,
         callback: StreamCallback,
         params: GenerationParams
-    ): Boolean = withContext(Dispatchers.IO) {
-        // Vision support via MediaPipe requires additional setup
-        // For now, fall back to text-only generation with a note
+    ): Boolean = withContext(Dispatchers.IO + InferenceThreadDiscipline.inferencePriority()) {
         if (!_supportsVision) {
             callback.onError("Vision is not supported for this model")
             return@withContext false
         }
-        
-        Log.w(TAG, "Vision support via MediaPipe is experimental")
-        
-        // For Gemma 3n models, we would need to use the vision-specific APIs
-        // which require additional session configuration
-        // For now, generate text-only and note that image was ignored
-        val enhancedPrompt = "[Image provided but vision processing is limited in this version]\n\n$prompt"
-        generateStream(enhancedPrompt, callback, params)
+        if (llmInference == null) {
+            callback.onError("No model loaded")
+            return@withContext false
+        }
+        if (!File(imagePath).exists()) {
+            callback.onError("Image file not found")
+            return@withContext false
+        }
+        val bitmap = decodeDownsampledBitmap(imagePath)
+        if (bitmap == null) {
+            callback.onError("Could not read the image file")
+            return@withContext false
+        }
+
+        // Wait for any prior invocation to fully finish before touching the
+        // shared session; released in the finally below.
+        generationMutex.lock()
+        _isGenerating = true
+        shouldStop.set(false)
+        try {
+            Log.d(TAG, "Vision generation: ${prompt.length} chars, image ${bitmap.width}x${bitmap.height}")
+            AppEventLogger.info(
+                component = TAG,
+                action = "generate_vision_start",
+                details = "promptChars=${prompt.length}, imageW=${bitmap.width}, imageH=${bitmap.height}"
+            )
+
+            val session = ensureSession(params)
+            if (session == null) {
+                callback.onError("Failed to acquire MediaPipe session")
+                return@withContext false
+            }
+
+            try {
+                session.addImage(BitmapImageBuilder(bitmap).build())
+                session.addQueryChunk(prompt)
+
+                val completedViaListener = AtomicBoolean(false)
+                val progressListener = ProgressListener<String> { partialResult, done ->
+                    if (!shouldStop.get()) {
+                        callback.onToken(partialResult)
+                    }
+                    // Always complete (see generateStream) so a stopped vision
+                    // turn cannot leave the consumer flow open forever.
+                    if (done && completedViaListener.compareAndSet(false, true)) {
+                        callback.onComplete()
+                    }
+                }
+
+                val future = session.generateResponseAsync(progressListener)
+                try {
+                    future.get()
+                } catch (e: Exception) {
+                    when {
+                        completedViaListener.get() ->
+                            Log.w(TAG, "future.get() threw after listener completed: ${e.message}")
+                        shouldStop.get() ->
+                            Log.i(TAG, "Vision generation cancelled: ${e.message}")
+                        else -> throw e
+                    }
+                }
+
+                // See generateStream: guarantee exactly-once completion even
+                // on the cancel paths.
+                if (completedViaListener.compareAndSet(false, true)) {
+                    callback.onComplete()
+                }
+
+                !shouldStop.get()
+            } catch (e: Exception) {
+                Log.e(TAG, "Vision generation error", e)
+                // Session may be in a broken state — drop it so the next call rebuilds.
+                try {
+                    currentSession?.close()
+                } catch (closeErr: Exception) {
+                    Log.w(TAG, "Error closing session after vision failure", closeErr)
+                }
+                currentSession = null
+                currentSessionParams = null
+                callback.onError(e.message ?: "Unknown error")
+                AppEventLogger.error(
+                    component = TAG,
+                    action = "generate_vision_failed",
+                    details = "reason=${e.message ?: "unknown"}",
+                    throwable = e
+                )
+                false
+            }
+        } finally {
+            _isGenerating = false
+            bitmap.recycle()
+            generationMutex.unlock()
+        }
+    }
+
+    /**
+     * Decode an image file, downsampling so the longest edge is at most
+     * [MAX_IMAGE_DIMENSION] — full-resolution photos would otherwise risk an
+     * OutOfMemoryError before the model ever sees them.
+     */
+    private fun decodeDownsampledBitmap(imagePath: String): Bitmap? {
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(imagePath, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                Log.w(TAG, "Image has no decodable bounds: $imagePath")
+                return null
+            }
+            var sampleSize = 1
+            val longestEdge = maxOf(bounds.outWidth, bounds.outHeight)
+            while (longestEdge / sampleSize > MAX_IMAGE_DIMENSION) {
+                sampleSize *= 2
+            }
+            val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            BitmapFactory.decodeFile(imagePath, opts)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode image: $imagePath", e)
+            null
+        }
     }
     
     override fun stopGeneration() {
         shouldStop.set(true)
         _isGenerating = false
+        // tasks-genai 0.10.32 ships a real cancel. Without it the native
+        // generation drained to completion in the background — holding
+        // generationMutex (blocking the next turn) and burning CPU for a
+        // response that was already discarded.
+        try {
+            currentSession?.cancelGenerateResponseAsync()
+        } catch (e: Throwable) {
+            Log.w(TAG, "cancelGenerateResponseAsync failed: ${e.message}")
+        }
         Log.d(TAG, "Stop generation requested")
     }
     
@@ -566,4 +910,81 @@ class MediaPipeEngine @Inject constructor(
      * Check if vision is supported by the currently loaded model
      */
     fun isVisionSupported(): Boolean = _supportsVision
+
+    /**
+     * Phase 1: runtime capabilities derived from the loaded model file name.
+     *
+     * MediaPipe doesn't expose programmatic capability introspection, so we
+     * pattern-match against the family slugs we ship in [AvailableModels].
+     * The repository layer intersects this with the manifest's declared set,
+     * so adding a richer family here only adds capability coverage — manifest
+     * remains the source of truth.
+     */
+    override fun getRuntimeCapabilities(): Set<ModelCapability> {
+        if (!_isModelLoaded) return emptySet()
+        val name = (modelPath?.let { File(it).name } ?: modelName.orEmpty()).lowercase()
+        val familySet = when {
+            name.startsWith("gemma-4-") -> setOf(
+                ModelCapability.VISION,
+                ModelCapability.AUDIO,
+                ModelCapability.REASONING,
+                ModelCapability.SPECULATIVE_DECODING,
+            )
+            name.startsWith("gemma-3n-") -> setOf(
+                ModelCapability.VISION,
+                ModelCapability.AUDIO,
+            )
+            else -> emptySet()
+        }
+        // The bundled `tasks-genai` SDK does not deliver pixel or audio data to
+        // the model today (generateWithImage is a text-only stub, and there is
+        // no audio-input API). Strip VISION/AUDIO when the runtime cannot honor
+        // them so the UI surfaces them as incomplete capabilities instead of
+        // silently swallowing the user's image or recording.
+        var caps = familySet
+        if (!supportsVisionInput()) caps = caps - ModelCapability.VISION
+        if (!supportsAudioInput()) caps = caps - ModelCapability.AUDIO
+        return caps
+    }
+
+    /**
+     * Whether this engine can deliver image input. The bundled
+     * `tasks-genai:0.10.32` exposes the LLM vision API
+     * ([LlmInferenceSession.addImage]) and [generateWithImage] is wired to it,
+     * so vision is genuinely supported for vision-capable models.
+     */
+    fun supportsVisionInput(): Boolean = true
+
+    /**
+     * Runtime gate for audio input on the bundled MediaPipe SDK. Probes (via
+     * reflection) for an audio-input method on [LlmInferenceSession]; the
+     * `tasks-genai` build wired into this app today exposes none, so this
+     * returns false. The [AUDIO_CALL_PATH_WIRED] interlock additionally blocks
+     * a true result until generateWithAudio() is wired to that API — otherwise
+     * audio would be advertised and then silently dropped (cf. the vision stub).
+     */
+    fun supportsAudioInput(): Boolean {
+        if (!AUDIO_CALL_PATH_WIRED) return false
+        return try {
+            LlmInferenceSession::class.java.getMethod("addAudio", ByteArray::class.java)
+            true
+        } catch (e: NoSuchMethodException) {
+            false
+        }
+    }
+
+    /**
+     * Phase 1 (Subphase F): reset conversation-scoped state. Closes the
+     * persistent session so the next [generate]/[generateStream] call rebuilds
+     * a fresh one with no carried-over context. The model itself stays loaded.
+     */
+    override suspend fun resetConversation() {
+        try {
+            currentSession?.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error closing session during resetConversation", e)
+        }
+        currentSession = null
+        currentSessionParams = null
+    }
 }

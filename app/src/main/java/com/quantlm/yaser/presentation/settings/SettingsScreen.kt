@@ -28,6 +28,7 @@ import android.provider.Settings
 import androidx.core.net.toUri
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.quantlm.yaser.data.local.GenerationPreferences
+import com.quantlm.yaser.domain.inference.SamplingParam
 import com.quantlm.yaser.domain.model.ModelLoadingState
 import com.quantlm.yaser.presentation.ui.common.ModernGradientHeader
 
@@ -39,6 +40,7 @@ fun SettingsScreen(
     onNavigateBack: (() -> Unit)? = null,
     useModernChrome: Boolean = false
 ) {
+    com.quantlm.yaser.presentation.util.LogScreenLifecycle("SettingsScreen")
     val loadedModel by viewModel.loadedModel.collectAsState()
     val modelLoadingState by viewModel.modelLoadingState.collectAsState()
     val temperature by viewModel.temperature.collectAsState()
@@ -53,11 +55,13 @@ fun SettingsScreen(
     val mirostat by viewModel.mirostat.collectAsState()
     val mirostatTau by viewModel.mirostatTau.collectAsState()
     val mirostatEta by viewModel.mirostatEta.collectAsState()
+    val samplingCapabilities by viewModel.samplingCapabilities.collectAsState()
     val isAdvancedInferenceEnabled by viewModel.isAdvancedInferenceEnabled.collectAsState()
     val contextLength by viewModel.contextLength.collectAsState()
     val cpuThreads by viewModel.cpuThreads.collectAsState()
     val gpuLayers by viewModel.gpuLayers.collectAsState()
     val hardwareAccelerationMode by viewModel.hardwareAccelerationMode.collectAsState()
+    val gemma4GpuOverride by viewModel.gemma4GpuOverride.collectAsState()
     val systemPrompt by viewModel.systemPrompt.collectAsState()
     val message by viewModel.message.collectAsState()
 
@@ -80,8 +84,7 @@ fun SettingsScreen(
                     title = "Settings",
                     subtitle = "Model behavior and app controls",
                     onBack = onNavigateBack,
-                    trailingIcon = Icons.Default.Settings,
-                    trailingContentDescription = "Settings"
+                    trailingIcon = null
                 )
             } else {
                 TopAppBar(
@@ -279,7 +282,8 @@ fun SettingsScreen(
                 "• 256-512: Medium length responses (default 512)\n" +
                 "• 512-1024: Long, detailed responses\n\n" +
                 "Higher values increase generation time and memory usage.",
-                        onReset = viewModel::resetMaxTokens
+                        onReset = viewModel::resetMaxTokens,
+                        enabled = SamplingParam.MAX_TOKENS in samplingCapabilities
                     )
                     
                     Divider()
@@ -296,7 +300,8 @@ fun SettingsScreen(
                                 "• 20-40: Balanced (40 recommended)\n" +
                                 "• 40-100: More diverse vocabulary\n\n" +
                                 "Works together with Top P to control output variety.",
-                        onReset = viewModel::resetTopK
+                        onReset = viewModel::resetTopK,
+                        enabled = SamplingParam.TOP_K in samplingCapabilities
                     )
 
                     AnimatedVisibility(
@@ -316,7 +321,8 @@ fun SettingsScreen(
                                 valueFormatter = { String.format("%.2f", it) },
                                 info = "Controls randomness in text generation.\n\n" +
                                         "Safe range is clamped to reduce model instability and looping.",
-                                onReset = viewModel::resetTemperature
+                                onReset = viewModel::resetTemperature,
+                                enabled = SamplingParam.TEMPERATURE in samplingCapabilities
                             )
 
                             Divider()
@@ -330,7 +336,8 @@ fun SettingsScreen(
                                 valueFormatter = { String.format("%.2f", it) },
                                 info = "Cumulative probability cutoff for token selection.\n\n" +
                                         "Lower values constrain outputs; extreme values can destabilize quality.",
-                                onReset = viewModel::resetTopP
+                                onReset = viewModel::resetTopP,
+                                enabled = SamplingParam.TOP_P in samplingCapabilities
                             )
 
                             Divider()
@@ -344,7 +351,8 @@ fun SettingsScreen(
                                 valueFormatter = { String.format("%.3f", it) },
                                 info = "Minimum probability threshold for token selection.\n\n" +
                                         "Range is limited to avoid catastrophic filtering behavior.",
-                                onReset = viewModel::resetMinP
+                                onReset = viewModel::resetMinP,
+                                enabled = SamplingParam.MIN_P in samplingCapabilities
                             )
 
                             Divider()
@@ -358,7 +366,8 @@ fun SettingsScreen(
                                 valueFormatter = { String.format("%.2f", it) },
                                 info = "Penalizes repeated tokens.\n\n" +
                                         "Strong penalties can degrade coherence, so this control is safety-clamped.",
-                                onReset = viewModel::resetRepeatPenalty
+                                onReset = viewModel::resetRepeatPenalty,
+                                enabled = SamplingParam.REPEAT_PENALTY in samplingCapabilities
                             )
 
                             OutlinedButton(
@@ -398,7 +407,8 @@ fun SettingsScreen(
                                 "• 32-64: Short-term repetition prevention (recommended)\n" +
                                 "• 128-256: Long-term pattern prevention\n\n" +
                                 "Larger values prevent repeating phrases from earlier in the response.",
-                        onReset = viewModel::resetRepeatLastN
+                        onReset = viewModel::resetRepeatLastN,
+                        enabled = SamplingParam.REPEAT_LAST_N in samplingCapabilities
                     )
                     
                     Divider()
@@ -415,7 +425,8 @@ fun SettingsScreen(
                                 "• 0.8-0.95: Light filtering\n" +
                                 "• 0.5-0.8: Moderate filtering\n\n" +
                                 "Helps reduce low-quality tokens while preserving diversity.",
-                        onReset = viewModel::resetTfsZ
+                        onReset = viewModel::resetTfsZ,
+                        enabled = SamplingParam.TFS_Z in samplingCapabilities
                     )
                     
                     Divider()
@@ -432,7 +443,8 @@ fun SettingsScreen(
                                 "• 0.8-0.95: Light effect\n" +
                                 "• 0.5-0.8: Moderate effect\n\n" +
                                 "Selects tokens with information content close to the expected value.",
-                        onReset = viewModel::resetTypicalP
+                        onReset = viewModel::resetTypicalP,
+                        enabled = SamplingParam.TYPICAL_P in samplingCapabilities
                     )
                 }
             }
@@ -480,7 +492,8 @@ fun SettingsScreen(
                                 "• 1: Mirostat 1.0 algorithm\n" +
                                 "• 2: Mirostat 2.0 algorithm (recommended if using Mirostat)\n\n" +
                             "When enabled, overrides Temperature, Top P, and Top K.",
-                        onReset = viewModel::resetMirostat
+                        onReset = viewModel::resetMirostat,
+                        enabled = SamplingParam.MIROSTAT in samplingCapabilities
                     )
                     
                     if (mirostat > 0) {
@@ -498,7 +511,8 @@ fun SettingsScreen(
                                     "• 5-7: Balanced\n" +
                                     "• 7-10: More diverse and creative\n\n" +
                                     "Higher values allow more randomness in generation.",
-                            onReset = viewModel::resetMirostatTau
+                            onReset = viewModel::resetMirostatTau,
+                            enabled = SamplingParam.MIROSTAT in samplingCapabilities
                         )
                         
                         Divider()
@@ -515,7 +529,8 @@ fun SettingsScreen(
                                     "• 0.05-0.2: Moderate adaptation (0.1 recommended)\n" +
                                     "• 0.2-1.0: Fast adaptation\n\n" +
                                     "Controls how quickly Mirostat adjusts to target entropy.",
-                            onReset = viewModel::resetMirostatEta
+                            onReset = viewModel::resetMirostatEta,
+                            enabled = SamplingParam.MIROSTAT in samplingCapabilities
                         )
                     }
                 }
@@ -625,6 +640,36 @@ fun SettingsScreen(
                                     "Higher values prioritize GPU execution while CPU handles fallback work.",
                             onReset = viewModel::resetGpuLayers
                         )
+
+                        Divider()
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = "Gemma-4 GPU Override",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Gemma-4 models are locked to CPU because GPU mode " +
+                                            "crashes on many devices. Enable to force-try GPU — if " +
+                                            "the app crashes on model load, turn this back off.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = gemma4GpuOverride,
+                                onCheckedChange = viewModel::setGemma4GpuOverride
+                            )
+                        }
                     }
                 }
             }
@@ -816,7 +861,8 @@ fun SettingSlider(
     steps: Int,
     valueFormatter: (Float) -> String,
     info: String,
-    onReset: (() -> Unit)? = null
+    onReset: (() -> Unit)? = null,
+    enabled: Boolean = true
 ) {
     var showInfo by remember { mutableStateOf(false) }
     
@@ -826,7 +872,14 @@ fun SettingSlider(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("$label: ${valueFormatter(value)}")
+            Text(
+                text = "$label: ${valueFormatter(value)}",
+                color = if (enabled) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -834,6 +887,7 @@ fun SettingSlider(
                 if (onReset != null) {
                     TextButton(
                         onClick = onReset,
+                        enabled = enabled,
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                     ) {
                         Text("Reset", style = MaterialTheme.typography.labelMedium)
@@ -857,9 +911,18 @@ fun SettingSlider(
             value = value,
             onValueChange = onValueChange,
             valueRange = valueRange,
-            steps = steps
+            steps = steps,
+            enabled = enabled
         )
-        
+
+        if (!enabled) {
+            Text(
+                text = "Not used by the active model's engine.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
         AnimatedVisibility(
             visible = showInfo,
             enter = expandVertically() + fadeIn(),

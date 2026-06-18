@@ -3,12 +3,17 @@ package com.quantlm.yaser.presentation
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.compose.setContent
+import androidx.core.view.WindowCompat
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -39,12 +44,14 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
     @Inject
     lateinit var appLockManager: AppLockManager
     
+    @OptIn(ExperimentalComposeUiApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
         // NOTE: Notification permission is now requested in the onboarding tutorial
         // instead of here, so users are informed about what it's for before granting.
-        
+
         setContent {
             val settings by appPreferences.getSettings().collectAsState(
                 initial = AppPreferences.AppSettings()
@@ -54,8 +61,13 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
                 themeMode = settings.themeMode,
                 colorSource = settings.themeColorSource
             ) {
-                Surface(color = MaterialTheme.colorScheme.background) {
-                    
+                Surface(
+                    color = MaterialTheme.colorScheme.background,
+                    // Expose Compose testTag values as resource IDs so Firebase
+                    // Test Lab Robo scripts can target elements by resourceId.
+                    modifier = Modifier.semantics { testTagsAsResourceId = true }
+                ) {
+
                     // Use rememberSaveable to persist unlock state across configuration changes
                     // This prevents the app from asking for credentials again on orientation change
                     var isUnlocked by rememberSaveable { mutableStateOf(false) }

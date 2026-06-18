@@ -1,14 +1,24 @@
 package com.quantlm.yaser.domain.usecase
 
 import android.util.Log
+import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import com.quantlm.yaser.domain.model.GenerationState
 import com.quantlm.yaser.domain.model.GenerationStats
 import com.quantlm.yaser.domain.model.Message
+import com.quantlm.yaser.domain.model.WebSearchResult
+import com.quantlm.yaser.domain.model.WebSourceRef
+import com.quantlm.yaser.domain.model.toRef
 import com.quantlm.yaser.domain.repository.ChatRepository
 import com.quantlm.yaser.domain.repository.InferenceRepository
+import com.quantlm.yaser.domain.repository.WebSearchRepository
+import com.quantlm.yaser.domain.util.DateTimeContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 /**
@@ -28,11 +38,77 @@ enum class ChatTemplateFormat {
 
 class SendMessageUseCase @Inject constructor(
     private val chatRepository: ChatRepository,
-    private val inferenceRepository: InferenceRepository
+    private val inferenceRepository: InferenceRepository,
+    private val webSearchRepository: WebSearchRepository
 ) {
-    
+
     companion object {
         private const val TAG = "SendMessageUseCase"
+        // Sources injected into the prompt. Capped low to protect modest
+        // on-device context windows; remaining sources are still shown in the UI.
+        private const val MAX_PROMPT_SOURCES = 3
+        // Upper word count for a message to qualify as a follow-up. A longer
+        // message that merely opens with "this"/"that" is almost always a
+        // self-contained question and must NOT pull in the previous topic.
+        private const val FOLLOW_UP_MAX_WORDS = 6
+
+        // History budgeting. Replaces the prior count-based MAX_HISTORY_MESSAGES.
+        // Reserve tokens out of the model's context for the assistant reply, and
+        // approximate token count as chars/CHARS_PER_TOKEN. CHARS_PER_TOKEN=4 is
+        // a deliberately conservative estimate that holds up across Llama/Qwen/
+        // Gemma BPE tokenizers without per-engine plumbing.
+        private const val REPLY_RESERVE_TOKENS = 1024
+        private const val CHARS_PER_TOKEN = 4
+        // Fallback when the active engine doesn't report its context (e.g. no
+        // model loaded yet). 4 k is the smallest production model we ship for.
+        private const val DEFAULT_CONTEXT_TOKENS = 4096
+        // Hard ceiling: a single message longer than this dominates context and
+        // is almost certainly a paste of scraped/log content. Keep it but stop
+        // it from monopolising prefill.
+        private const val PER_MESSAGE_TOKEN_CAP = 2048
+
+        // Web-augmentation caps. Keep the prompt block bounded so a long scraped
+        // page can't push the model far past its context window before we even
+        // start generating.
+        private const val WEB_PER_SOURCE_CHAR_CAP = 1500
+        private const val WEB_BLOCK_CHAR_CAP = 4000
+        // Total time allowed for the search-and-scrape phase. The repo already
+        // has its own internal budgets; this is the outer wall-clock guard so a
+        // hung scrape can't turn into multi-minute "freeze when sending".
+        private const val WEB_SEARCH_TOTAL_TIMEOUT_MS = 8_000L
+    }
+
+    /**
+     * Drop oldest turns until the rough token total of the kept history fits
+     * inside [contextTokens] - [REPLY_RESERVE_TOKENS] - systemPromptTokens.
+     * Always keeps the most recent message (the one we're about to answer).
+     * Individual messages over [PER_MESSAGE_TOKEN_CAP] are tail-trimmed in place
+     * rather than dropped, so a long user paste still informs the reply.
+     */
+    internal fun fitHistory(
+        priorMessages: List<Message>,
+        systemPromptChars: Int,
+        contextTokens: Int,
+    ): List<Message> {
+        val effectiveContext = if (contextTokens > 0) contextTokens else DEFAULT_CONTEXT_TOKENS
+        val systemPromptTokens = systemPromptChars / CHARS_PER_TOKEN
+        var remaining = (effectiveContext - REPLY_RESERVE_TOKENS - systemPromptTokens).coerceAtLeast(512)
+
+        val capped = priorMessages.map { msg ->
+            val tokens = msg.content.length / CHARS_PER_TOKEN
+            if (tokens > PER_MESSAGE_TOKEN_CAP) {
+                msg.copy(content = msg.content.take(PER_MESSAGE_TOKEN_CAP * CHARS_PER_TOKEN))
+            } else msg
+        }
+
+        val kept = ArrayDeque<Message>()
+        for (msg in capped.asReversed()) {
+            val cost = msg.content.length / CHARS_PER_TOKEN + 8 // small overhead for role tags
+            if (cost > remaining) break
+            kept.addFirst(msg)
+            remaining -= cost
+        }
+        return kept
     }
     
     /**
@@ -70,6 +146,154 @@ class SendMessageUseCase @Inject constructor(
     }
     
     /**
+     * Append a reasoning directive (`/think` or `/no_think`) to the system
+     * prompt. SmolLM3 and Qwen3 chat templates honor these flags to toggle
+     * chain-of-thought; models that don't recognise them ignore them harmlessly.
+     */
+    private fun appendReasoningDirective(systemPrompt: String, directive: String): String {
+        return if (systemPrompt.isBlank()) directive else "$systemPrompt\n\n$directive"
+    }
+
+    /**
+     * Derives the web search query from the user's message.
+     *
+     * Only messages that *open with a word referencing the previous turn* (a
+     * pronoun/demonstrative or a continuation word) are treated as follow-ups
+     * and enriched with the previous user message. A standalone question — even
+     * a short one like "Who is Ada Lovelace?" — is used verbatim.
+     *
+     * This is deliberately conservative: enriching a standalone question pulls
+     * the previous topic into the search, which made unrelated follow-up
+     * questions retrieve the *previous* answer's sources. Enrichment therefore
+     * requires BOTH the follow-up prefix AND a short message (<= [FOLLOW_UP_MAX_WORDS]
+     * words) — a long, self-contained question that merely opens with
+     * "this"/"that" is used verbatim. Length only narrows the regex match; it is
+     * never a follow-up signal on its own. [history] already includes the
+     * just-inserted message.
+     */
+    internal fun buildSearchQuery(userMessage: String, history: List<Message>): String {
+        val msg = userMessage.trim()
+        if (msg.isEmpty()) return msg
+        val followUpPattern = Regex(
+            "^(it|its|it's|that|this|they|them|those|these|he|she|him|his|her|their|theirs|" +
+                "and|also|but|what about|how about|what else|tell me more|more on|the same)\\b",
+            RegexOption.IGNORE_CASE
+        )
+        val wordCount = msg.split(Regex("\\s+")).count { it.isNotEmpty() }
+        val isFollowUp = wordCount <= FOLLOW_UP_MAX_WORDS && followUpPattern.containsMatchIn(msg)
+        val baseQuery = if (!isFollowUp) {
+            msg
+        } else {
+            val priorUser = history
+                .lastOrNull { it.isUser && it.content.trim() != msg }
+                ?.content?.trim()
+            if (priorUser.isNullOrEmpty()) msg else "$priorUser $msg"
+        }
+        return augmentQueryRecency(baseQuery)
+    }
+
+    /**
+     * Anchors time-sensitive searches to the current year so the search backend
+     * surfaces fresher results. Deliberately conservative: only acts when the
+     * query is explicitly framed as time-sensitive, appends the year alone
+     * (never a full date, which over-constrains recall), and never adds a year
+     * the query already contains.
+     */
+    internal fun augmentQueryRecency(query: String): String {
+        val temporalKeyword = Regex(
+            "\\b(latest|current|today|now|recent|this year|this month)\\b",
+            RegexOption.IGNORE_CASE
+        )
+        if (!temporalKeyword.containsMatchIn(query)) return query
+        if (Regex("\\b(19|20)\\d{2}\\b").containsMatchIn(query)) return query
+        return "$query ${DateTimeContext.currentYear()}"
+    }
+
+    /**
+     * Prepends a strict, citation-grounded `<web_search_context>` block to the
+     * system prompt. The model is told to synthesize an organized answer using
+     * ONLY the supplied sources — never raw-paste them, never guess. Handles the
+     * empty/error case so a network failure degrades gracefully instead of
+     * silently producing an ungrounded answer.
+     */
+    internal fun buildWebAugmentedSystemPrompt(
+        baseSystemPrompt: String,
+        result: WebSearchResult,
+    ): String {
+        val block = if (result.isEmpty) {
+            buildString {
+                appendLine("<web_search_context>")
+                append("A web search was run for the user's question but returned no usable results")
+                result.error?.let { append(" ($it)") }
+                appendLine(".")
+                appendLine(
+                    "Begin your reply by telling the user plainly that live web information could " +
+                        "not be retrieved for this question."
+                )
+                appendLine(
+                    "Then answer from your own knowledge ONLY if you are genuinely confident, and " +
+                        "clearly label that part as not web-verified. If you are not confident, say " +
+                        "you do not know rather than guessing."
+                )
+                appendLine(
+                    "Never invent facts, sources, or citations. You may suggest the user rephrase " +
+                        "the question or run the search again."
+                )
+                append("</web_search_context>")
+            }
+        } else {
+            buildString {
+                appendLine("<web_search_context>")
+                appendLine(
+                    "Web search results for the user's question are below. Ground your answer " +
+                        "in these sources. For the current date or time, use the <current_datetime> " +
+                        "block provided elsewhere in this prompt — that block, not these sources, " +
+                        "is the authority on \"now\"."
+                )
+                appendLine(
+                    "Judge how recent each source is against the current date in the " +
+                        "<current_datetime> block provided in this prompt; prefer the most " +
+                        "up-to-date information and flag clearly outdated sources."
+                )
+                appendLine()
+                appendLine("How to answer:")
+                appendLine(
+                    "- SYNTHESIZE a single, coherent, well-organized answer in your own words. " +
+                        "Do NOT paste, quote, or stitch together raw passages from the sources."
+                )
+                appendLine(
+                    "- Lead with a direct answer to the question, then supporting detail. " +
+                        "Use short paragraphs, and markdown headings/bullets only when they genuinely aid clarity."
+                )
+                appendLine("- Cite every factual claim inline as [1], [2], etc., matching the numbered sources below.")
+                appendLine(
+                    "- If the sources do not contain the answer, say so plainly — do NOT use prior knowledge " +
+                        "or guess. If sources disagree, point that out briefly."
+                )
+                appendLine(
+                    "- If the sources predate or look outdated relative to the current date, say the " +
+                        "information may be out of date. Do NOT fill gaps with guessed \"current\" facts."
+                )
+                appendLine()
+                var remainingBlockBudget = WEB_BLOCK_CHAR_CAP
+                result.sources.take(MAX_PROMPT_SOURCES).forEachIndexed { index, source ->
+                    val raw = source.content.ifBlank { source.snippet }
+                    val perSource = raw.take(WEB_PER_SOURCE_CHAR_CAP)
+                    val body = perSource.take(remainingBlockBudget)
+                    if (body.isEmpty()) return@forEachIndexed
+                    appendLine("[${index + 1}] ${source.title} — ${source.domain}")
+                    appendLine(body)
+                    appendLine()
+                    remainingBlockBudget -= body.length
+                    if (remainingBlockBudget <= 0) return@forEachIndexed
+                }
+                append("</web_search_context>")
+            }
+        }
+        return if (baseSystemPrompt.isBlank()) block else "$block\n\n$baseSystemPrompt"
+    }
+
+    /**
      * Build prompt using the appropriate chat template format.
      * This is model-agnostic and auto-detects the right format.
      */
@@ -79,13 +303,39 @@ class SendMessageUseCase @Inject constructor(
         
         Log.d(TAG, "Using chat template format: $format (detected from: $template)")
         
-        val history = if (messages.size > 1) {
-            messages.dropLast(1).takeLast(10)
+        // Find the last model-change marker and only use messages after it.
+        // This prevents the new model from having to prefill the entire old
+        // conversation history as KV cache on its first turn, which causes
+        // minutes-long latency. Marker rows are filtered out before building
+        // the template string — they must never reach the LLM.
+        val contextStart = messages.indexOfLast { it.isModelChangeMarker } + 1
+        val nonMarkerMessages = messages.drop(contextStart).filter { !it.isModelChangeMarker }
+        val priorMessages = if (nonMarkerMessages.size > 1) {
+            nonMarkerMessages.dropLast(1)
         } else {
             emptyList()
         }
-        val currentMessage = messages.lastOrNull()
-        
+        // Budget history against the active model's actual context window
+        // (queried lazily — engines that don't expose it fall back to a safe
+        // default). Older turns that don't fit are dropped silently rather than
+        // surfaced via a <context_note>; that note used to leak into replies
+        // and confuse the model.
+        //
+        // Date/time rides on the CURRENT turn (ephemeral copy, never persisted)
+        // instead of the system prompt: a per-minute timestamp at the head of
+        // the prompt invalidated the llama KV prefix cache on every send. Its
+        // chars are added to the system-prompt budget so history fitting still
+        // accounts for them.
+        val dateTimeBlock = DateTimeContext.currentDateTimeBlock()
+        val activeContextTokens = inferenceRepository.getActiveContextTokens()
+        val history = fitHistory(
+            priorMessages,
+            systemPrompt.length + dateTimeBlock.length,
+            activeContextTokens
+        )
+        val currentMessage = nonMarkerMessages.lastOrNull()
+            ?.let { appendDateTimeToCurrentTurn(it, dateTimeBlock) }
+
         return when (format) {
             ChatTemplateFormat.PHI3 -> buildPhi3Prompt(history, currentMessage, systemPrompt)
             ChatTemplateFormat.CHATML -> buildChatMLPrompt(history, currentMessage, systemPrompt)
@@ -98,6 +348,21 @@ class SendMessageUseCase @Inject constructor(
         }
     }
     
+    /**
+     * Ephemerally append the `<current_datetime>` block to the turn that is
+     * about to be answered. Returns a copy — the persisted message is never
+     * mutated. See [buildPrompt] for why this must not live in the system
+     * prompt (KV prefix-cache invalidation). Internal for unit testing.
+     */
+    internal fun appendDateTimeToCurrentTurn(message: Message, dateTimeBlock: String): Message =
+        if (message.isUser) {
+            message.copy(content = "${message.content}\n\n$dateTimeBlock")
+        } else {
+            // A non-user "current" message is never rendered as the active turn
+            // by the template builders; leave it untouched.
+            message
+        }
+
     /**
      * MediaPipe Raw: Send text directly without chat template wrapping.
      * MediaPipe's addQueryChunk() handles conversation formatting internally.
@@ -207,16 +472,20 @@ class SendMessageUseCase @Inject constructor(
     // Gemma: <start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n
     private fun buildGemmaPrompt(history: List<Message>, current: Message?, systemPrompt: String): String {
         return buildString {
-            // Gemma doesn't have explicit system role, prepend to first user message
+            // Gemma has no explicit system role, so the system prompt is
+            // prepended to the first user turn as plain text. It is NOT wrapped
+            // in "[System: ...]": the system prompt can contain web-scraped
+            // text with ']' characters or newlines, and a bracket wrapper would
+            // be closed prematurely by them — corrupting the template and
+            // leaking instructions into the user turn (a hallucination source).
             var systemUsed = false
-            
+
             for (msg in history) {
                 if (msg.isUser) {
                     append("<start_of_turn>user\n")
                     if (!systemUsed && systemPrompt.isNotEmpty()) {
-                        append("[System: ")
                         append(systemPrompt)
-                        append("]\n\n")
+                        append("\n\n")
                         systemUsed = true
                     }
                     append(msg.content)
@@ -227,18 +496,17 @@ class SendMessageUseCase @Inject constructor(
                     append("<end_of_turn>\n")
                 }
             }
-            
+
             if (current != null && current.isUser) {
                 append("<start_of_turn>user\n")
                 if (!systemUsed && systemPrompt.isNotEmpty()) {
-                    append("[System: ")
                     append(systemPrompt)
-                    append("]\n\n")
+                    append("\n\n")
                 }
                 append(current.content)
                 append("<end_of_turn>\n")
             }
-            
+
             append("<start_of_turn>model\n")
         }
     }
@@ -397,9 +665,13 @@ class SendMessageUseCase @Inject constructor(
         cleaned = cleaned.replace(Regex("^\\s*(?:assistant|model)\\s*:\\s*", RegexOption.IGNORE_CASE), "")
         cleaned = cleaned.replace(Regex("^\\s*(?:assistant|model)\\s*\\n+", RegexOption.IGNORE_CASE), "")
         
-        // Remove any remaining partial tokens at end
-        cleaned = cleaned.replace(Regex("<[^>]*$"), "")
-        cleaned = cleaned.replace(Regex("\\[[^\\]]*$"), "")
+        // Remove any remaining partial tokens at end.
+        // `[^<>]` / `[^\[\]]` prevents the regex from spanning across legitimate
+        // `<` or `[` characters earlier in the response — without those negations
+        // any answer containing `5 < 10`, `<div>`, or `Section [4.2` got
+        // truncated from the first stray bracket onward.
+        cleaned = cleaned.replace(Regex("<[^<>]*$"), "")
+        cleaned = cleaned.replace(Regex("\\[[^\\[\\]]*$"), "")
 
         val normalized = finaliseWhitespace(cleaned, collapseWhitespace)
         if (normalized.isNotBlank()) {
@@ -469,7 +741,10 @@ class SendMessageUseCase @Inject constructor(
         stopSequences: List<String> = emptyList(),
         systemPrompt: String,
         imagePaths: List<String> = emptyList(),
-        isRegeneration: Boolean = false
+        audioPaths: List<String> = emptyList(),
+        isRegeneration: Boolean = false,
+        reasoningEnabled: Boolean? = null,
+        webSearchEnabled: Boolean = false
     ): Flow<GenerationState> = flow {
         
         Log.d(TAG, "=== SEND MESSAGE START: temp=$temperature, maxTokens=$maxTokens, isRegen=$isRegeneration ===")
@@ -488,94 +763,263 @@ class SendMessageUseCase @Inject constructor(
                 conversationId = conversationId,
                 content = userMessage,
                 isUser = true,
-                imagePaths = imagePaths
+                imagePaths = imagePaths,
+                audioPaths = audioPaths
             )
             chatRepository.insertMessage(userMsg)
         }
         
         emit(GenerationState.Loading)
         
-        // Determine if this is a vision request
+        // Determine the request modality (audio takes precedence over vision)
         val primaryImagePath = imagePaths.firstOrNull()
         val isVisionRequest = primaryImagePath != null && inferenceRepository.isVisionSupported()
-        
+        val primaryAudioPath = audioPaths.firstOrNull()
+        val isAudioRequest = primaryAudioPath != null && inferenceRepository.isAudioSupported()
+
+        // Reasoning directive (/think, /no_think) is injected into the system
+        // prompt for GGUF/MediaPipe models; the LiteRT path uses the native
+        // enable_thinking flag instead, so its directive is left out below.
+        val usesNativeThinkingFlag = inferenceRepository.getActiveModelFormatLabel() == "LiteRT-LM"
+        val effectiveSystemPrompt = when {
+            reasoningEnabled == null || usesNativeThinkingFlag -> systemPrompt
+            reasoningEnabled -> appendReasoningDirective(systemPrompt, "/think")
+            else -> appendReasoningDirective(systemPrompt, "/no_think")
+        }
+        val reasoningOn = reasoningEnabled == true
+
+        // Web Search: when the toggle is on, fetch fresh web context and inject
+        // it into the system prompt (model-agnostic — works for every template).
+        // When off, this block is skipped entirely and the app makes no network
+        // request. It runs for vision/audio requests too: the web context is
+        // appended to the same system prompt that the vision/audio prompt is
+        // built from, so the model can use the web AND the attached media
+        // together — '+' menu features compose freely.
+        var webSources: List<WebSourceRef> = emptyList()
+        var finalSystemPrompt = effectiveSystemPrompt
+        if (webSearchEnabled) {
+            // Surface a distinct status while the (potentially slow) web fetch runs.
+            emit(GenerationState.SearchingWeb())
+            val history = chatRepository.getMessagesForConversation(conversationId)
+                .firstOrNull() ?: emptyList()
+            val searchQuery = buildSearchQuery(userMessage, history)
+            AppEventLogger.info(TAG, "web_search_start", "query=$searchQuery")
+            // Outer wall-clock guard. WebSearchRepositoryImpl already has its own
+            // per-page budgets, but a hung scrape used to compound into multi-minute
+            // "freeze on send". On timeout we degrade to no-web-context rather than
+            // making the user wait.
+            val searchResult = withTimeoutOrNull(WEB_SEARCH_TOTAL_TIMEOUT_MS) {
+                webSearchRepository.search(searchQuery, maxResults = 4)
+            }
+            if (searchResult != null) {
+                finalSystemPrompt = buildWebAugmentedSystemPrompt(effectiveSystemPrompt, searchResult)
+                webSources = searchResult.sources.take(MAX_PROMPT_SOURCES).map { it.toRef() }
+            } else {
+                AppEventLogger.warn(
+                    TAG,
+                    "web_search_timeout",
+                    "budgetMs=$WEB_SEARCH_TOTAL_TIMEOUT_MS, query=$searchQuery"
+                )
+            }
+        }
+
+        // NOTE: the <current_datetime> block is injected onto the CURRENT turn
+        // inside buildPrompt(), NOT appended to the system prompt here. The
+        // system prompt is the first thing in every template, and a
+        // minute-resolution timestamp there changed the token prefix on every
+        // send — defeating the native KV prefix cache (g_cached_tokens in
+        // llama_jni.cpp) and forcing a full re-prefill of the entire
+        // conversation each turn. Tail placement preserves the cached prefix
+        // while the model still receives the exact current time every turn.
+
         // Estimate prompt tokens (rough approximation: ~4 chars per token)
         val estimatedPromptTokens = (userMessage.length + systemPrompt.length) / 4
-        
-        val responseFlow = if (isVisionRequest) {
-            // Vision model path
-            val visionPrompt = buildVisionPrompt(userMessage, systemPrompt, imagePaths.size)
-            
-            inferenceRepository.generateStreamWithImage(
-                prompt = visionPrompt,
-                imagePath = primaryImagePath!!,
-                temperature = temperature,
-                maxTokens = maxTokens,
-                topP = topP,
-                topK = topK,
-                repeatPenalty = repeatPenalty,
-                repeatLastN = repeatLastN,
-                minP = minP,
-                tfsZ = tfsZ,
-                typicalP = typicalP,
-                mirostat = mirostat,
-                mirostatTau = mirostatTau,
-                mirostatEta = mirostatEta,
-                stopSequences = stopSequences
+
+        // Pre-token indicator: surface the dominant modality before handing
+        // off to the engine. The engine call itself is opaque from here on —
+        // model loads input, runs prefill, then starts streaming tokens. The
+        // first `Generating` / `Thinking` emit from downstream replaces this
+        // state automatically. Audio > vision > reasoning, mirroring the
+        // routing precedence in `when` below; web search has its own slot
+        // earlier and isn't overridden here.
+        //
+        // Combinations: reasoning composes with audio or vision via the
+        // `alsoReasoning` flag (single bubble, dual icon). Audio + vision is
+        // not a real engine combination — the routing chooses audio if both
+        // are attached, so we never need a tri-modal indicator.
+        when {
+            isAudioRequest -> emit(
+                GenerationState.TranscribingAudio(
+                    message = if (reasoningOn) {
+                        "Listening to your audio and preparing to think this through…"
+                    } else {
+                        "Listening to your audio, this may take a moment…"
+                    },
+                    alsoReasoning = reasoningOn,
+                )
             )
-        } else {
-            // Text-only path - use conversation history
-            val messages = chatRepository.getMessagesForConversation(conversationId).firstOrNull() ?: emptyList()
-            val formattedPrompt = buildPrompt(messages, systemPrompt)
-            
-            inferenceRepository.generateStream(
-                prompt = formattedPrompt,
-                temperature = temperature,
-                maxTokens = maxTokens,
-                topP = topP,
-                topK = topK,
-                repeatPenalty = repeatPenalty,
-                repeatLastN = repeatLastN,
-                minP = minP,
-                tfsZ = tfsZ,
-                typicalP = typicalP,
-                mirostat = mirostat,
-                mirostatTau = mirostatTau,
-                mirostatEta = mirostatEta,
-                stopSequences = stopSequences
+            isVisionRequest -> emit(
+                GenerationState.AnalyzingImage(
+                    message = if (reasoningOn) {
+                        "Analyzing the image and preparing to think this through…"
+                    } else {
+                        "Analyzing the image, this may take a moment…"
+                    },
+                    alsoReasoning = reasoningOn,
+                )
             )
+            reasoningOn -> emit(GenerationState.PreparingReasoning())
+            else -> { /* Loading already covers it */ }
+        }
+
+        val responseFlow = when {
+            isAudioRequest -> {
+                // Audio model path
+                val audioPrompt = buildVisionPrompt(userMessage, finalSystemPrompt, 1)
+
+                inferenceRepository.generateStreamWithAudio(
+                    prompt = audioPrompt,
+                    audioPath = primaryAudioPath!!,
+                    temperature = temperature,
+                    maxTokens = maxTokens,
+                    topP = topP,
+                    topK = topK,
+                    repeatPenalty = repeatPenalty,
+                    repeatLastN = repeatLastN,
+                    minP = minP,
+                    tfsZ = tfsZ,
+                    typicalP = typicalP,
+                    mirostat = mirostat,
+                    mirostatTau = mirostatTau,
+                    mirostatEta = mirostatEta,
+                    stopSequences = stopSequences,
+                    reasoningEnabled = reasoningOn
+                )
+            }
+            isVisionRequest -> {
+                // Vision model path
+                val visionPrompt = buildVisionPrompt(userMessage, finalSystemPrompt, imagePaths.size)
+
+                inferenceRepository.generateStreamWithImage(
+                    prompt = visionPrompt,
+                    imagePath = primaryImagePath!!,
+                    temperature = temperature,
+                    maxTokens = maxTokens,
+                    topP = topP,
+                    topK = topK,
+                    repeatPenalty = repeatPenalty,
+                    repeatLastN = repeatLastN,
+                    minP = minP,
+                    tfsZ = tfsZ,
+                    typicalP = typicalP,
+                    mirostat = mirostat,
+                    mirostatTau = mirostatTau,
+                    mirostatEta = mirostatEta,
+                    stopSequences = stopSequences,
+                    reasoningEnabled = reasoningOn
+                )
+            }
+            else -> {
+                // Text-only path - use conversation history
+                val messages = chatRepository.getMessagesForConversation(conversationId).firstOrNull() ?: emptyList()
+                val formattedPrompt = buildPrompt(messages, finalSystemPrompt)
+
+                inferenceRepository.generateStream(
+                    prompt = formattedPrompt,
+                    temperature = temperature,
+                    maxTokens = maxTokens,
+                    topP = topP,
+                    topK = topK,
+                    repeatPenalty = repeatPenalty,
+                    repeatLastN = repeatLastN,
+                    minP = minP,
+                    tfsZ = tfsZ,
+                    typicalP = typicalP,
+                    mirostat = mirostat,
+                    mirostatTau = mirostatTau,
+                    mirostatEta = mirostatEta,
+                    stopSequences = stopSequences,
+                    reasoningEnabled = reasoningOn
+                )
+            }
         }
         
         var fullResponse = ""
-        
+        var extractedThinking: String? = null
+        var extractedThoughtSummary: String? = null
+        // Real-time stats: count streaming events as token proxy and measure TTFT.
+        // Each Generating emission from llama.cpp / MediaPipe corresponds to one
+        // decoded token (or a small batch), making this far more accurate than the
+        // chars/4 heuristic.
+        var streamingTokenCount = 0
+        var firstTokenTimeMs: Long? = null
+
         responseFlow.collect { state ->
             when (state) {
                 is GenerationState.Generating -> {
-                    // Just pass through the text during generation - skip cleaning for performance
+                    streamingTokenCount++
+                    if (firstTokenTimeMs == null) firstTokenTimeMs = System.currentTimeMillis()
                     fullResponse = state.currentText
-                    emit(GenerationState.Generating(fullResponse))
+                    val parsed = parseThinkingStream(fullResponse)
+                    when {
+                        parsed.thinkingClosed -> {
+                            extractedThinking = parsed.thinking
+                            extractedThoughtSummary = parsed.thoughtSummary
+                            // Emit closed Thinking (with summary if parsed), then start streaming answer.
+                            emit(GenerationState.Thinking(
+                                content = parsed.thinking ?: "",
+                                partial = false,
+                                thoughtSummary = parsed.thoughtSummary,
+                            ))
+                            emit(GenerationState.Generating(parsed.remainder))
+                        }
+                        parsed.thinking != null -> {
+                            emit(GenerationState.Thinking(parsed.thinking, partial = true))
+                        }
+                        else -> emit(GenerationState.Generating(fullResponse))
+                    }
                 }
                 is GenerationState.Complete -> {
                     // Calculate generation time
                     val generationTimeMs = System.currentTimeMillis() - generationStartTime
                     
+                    // Final pass — catches the case where the whole block lands in the Complete payload.
+                    val completeParse = parseThinkingStream(state.text)
+                    if (completeParse.thinkingClosed && completeParse.thinking != null) {
+                        extractedThinking = completeParse.thinking
+                        if (completeParse.thoughtSummary != null) extractedThoughtSummary = completeParse.thoughtSummary
+                    }
+                    val responseText = if (completeParse.thinkingClosed) completeParse.remainder else state.text
+                    if (extractedThinking != null) {
+                        AppEventLogger.info(
+                            component = TAG,
+                            action = "thinking_block_detected",
+                            details = "model=$modelName, length=${extractedThinking!!.length}"
+                        )
+                    }
                     // Clean the final response text only (not during streaming)
                     fullResponse = cleanResponse(
-                        text = state.text,
+                        text = responseText,
                         collapseWhitespace = true,
                         stopSequences = stopSequences
                     )
                     
-                    // Estimate tokens generated (rough: ~4 chars per token)
-                    val tokensGenerated = fullResponse.length / 4 + 1
-                    val tokensPerSecond = if (generationTimeMs > 0) {
-                        tokensGenerated * 1000f / generationTimeMs
-                    } else 0f
-                    
+                    // Token count: streaming emissions are throttled to a
+                    // 400–1200 ms cadence, so the event count *undercounts*
+                    // tokens for any non-trivial reply. Take whichever proxy is
+                    // larger — the chars/4 estimate dominates for throttled
+                    // streams; the event count covers very short replies.
+                    val tokensGenerated = maxOf(streamingTokenCount, fullResponse.length / 4 + 1)
+                    // TTFT: time from request start until first token arrived.
+                    val ttft = firstTokenTimeMs?.minus(generationStartTime) ?: 0L
+                    // Decode time: everything after the first token.
+                    val decodeMs = (generationTimeMs - ttft).coerceAtLeast(1L)
+                    val tokensPerSecond = if (decodeMs > 0) tokensGenerated * 1000f / decodeMs else 0f
+
                     // Get memory usage
                     val runtime = Runtime.getRuntime()
                     val usedMemory = runtime.totalMemory() - runtime.freeMemory()
-                    
+
                     // Build generation stats
                     val stats = GenerationStats(
                         generationTimeMs = generationTimeMs,
@@ -592,7 +1036,10 @@ class SendMessageUseCase @Inject constructor(
                         wasVisionRequest = isVisionRequest,
                         imageCount = imagePaths.size,
                         backend = backendLabel,
-                        modelFormat = modelFormatLabel
+                        modelFormat = modelFormatLabel,
+                        timeToFirstTokenMs = ttft,
+                        decodeTimeMs = decodeMs,
+                        totalLatencyMs = generationTimeMs,
                     )
                     
                     Log.d(TAG, "=== COMPLETE: ${stats.formatGenerationTime()}, ${stats.formatTokensPerSecond()} ===")
@@ -602,7 +1049,10 @@ class SendMessageUseCase @Inject constructor(
                         conversationId = conversationId,
                         content = fullResponse,
                         isUser = false,
-                        generationStats = stats
+                        generationStats = stats,
+                        thinkingContent = extractedThinking,
+                        thoughtSummary = extractedThoughtSummary,
+                        sources = webSources,
                     )
                     chatRepository.insertMessage(assistantMsg)
                     
@@ -618,5 +1068,64 @@ class SendMessageUseCase @Inject constructor(
                 else -> emit(state)
             }
         }
+    }.flowOn(Dispatchers.Default)
+    // All pre-inference work (Room reads, prompt building, web search timeout,
+    // template formatting) is heavy enough to visibly stall the UI when it runs
+    // on viewModelScope's Main.immediate dispatcher. Push the whole flow to
+    // Default; collectors on Main only see the GenerationState emissions.
+
+    /**
+     * Incremental parser for the structured reasoning format:
+     *   <thinking>...</thinking>
+     *   <thought_summary>...</thought_summary>
+     *   [final answer]
+     *
+     * Falls back gracefully when the model uses the old <think>...</think> format or omits the
+     * summary block entirely. Only handles a single thinking block at the head of the stream.
+     */
+    private fun parseThinkingStream(text: String): ThinkingParse {
+        // Support both tag styles: <thinking> (new) and <think> (legacy)
+        val openTag = when {
+            text.contains("<thinking>") -> "<thinking>"
+            text.contains("<think>") -> "<think>"
+            else -> return ThinkingParse(thinking = null, thinkingClosed = false, remainder = text)
+        }
+        val closeTag = if (openTag == "<thinking>") "</thinking>" else "</think>"
+
+        val startIdx = text.indexOf(openTag)
+        val endIdx = text.indexOf(closeTag, startIndex = startIdx + openTag.length)
+        if (endIdx < 0) {
+            val partial = text.substring(startIdx + openTag.length)
+            return ThinkingParse(thinking = partial, thinkingClosed = false, remainder = "")
+        }
+
+        val thinking = text.substring(startIdx + openTag.length, endIdx)
+        val afterThinking = text.substring(endIdx + closeTag.length)
+
+        // Try to extract <thought_summary>...</thought_summary> from what follows
+        val summaryStart = afterThinking.indexOf("<thought_summary>")
+        val summaryEnd = afterThinking.indexOf("</thought_summary>")
+        val (thoughtSummary, remainder) = when {
+            summaryStart >= 0 && summaryEnd > summaryStart -> {
+                val sum = afterThinking.substring(summaryStart + "<thought_summary>".length, summaryEnd).trim()
+                val rest = afterThinking.substring(summaryEnd + "</thought_summary>".length).trimStart()
+                Pair(sum, rest)
+            }
+            else -> Pair(null, afterThinking.trimStart())
+        }
+
+        return ThinkingParse(
+            thinking = thinking,
+            thinkingClosed = true,
+            thoughtSummary = thoughtSummary,
+            remainder = remainder,
+        )
     }
+
+    private data class ThinkingParse(
+        val thinking: String?,
+        val thinkingClosed: Boolean,
+        val thoughtSummary: String? = null,
+        val remainder: String,
+    )
 }

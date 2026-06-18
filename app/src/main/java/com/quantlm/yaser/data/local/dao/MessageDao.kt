@@ -42,7 +42,9 @@ interface MessageDao {
     @Delete
     suspend fun delete(message: MessageEntity)
     
-    @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY timestamp ASC")
+    // id is the tiebreaker: rows inserted within the same millisecond (e.g. a
+    // model-change marker right after a message) must keep insertion order.
+    @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY timestamp ASC, id ASC")
     fun getByConversationId(conversationId: Long): Flow<List<MessageEntity>>
     
     @Query("DELETE FROM messages WHERE conversationId = :conversationId")

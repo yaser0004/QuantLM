@@ -12,26 +12,27 @@ import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
-import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
 
 /**
- * Foreground service to keep inference running when app is in background.
- * This prevents the system from killing the process during long-running generation.
+ * Foreground service that raises the process to foreground importance so the OS does not
+ * kill it mid-generation. The CPU wake lock for inference is owned by
+ * `InferenceRepositoryImpl` (scoped to a single generation); this service intentionally
+ * holds no wake lock to avoid the prior pair of overlapping locks.
  */
 @AndroidEntryPoint
 class InferenceService : Service() {
-    
+
     private val binder = InferenceBinder()
-    private var wakeLock: PowerManager.WakeLock? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    
+
     @Volatile
     private var isGenerating = false
     
@@ -67,7 +68,15 @@ class InferenceService : Service() {
             val intent = Intent(context, InferenceService::class.java).apply {
                 action = ACTION_STOP_INFERENCE
             }
-            context.startService(intent)
+            try {
+                context.startService(intent)
+            } catch (e: IllegalStateException) {
+                // App backgrounded with the service already stopped (e.g. a
+                // late duplicate stop after a long-stopped generation finally
+                // wound down) — Android forbids the background start; there is
+                // nothing left to stop.
+                Log.w(TAG, "stopInference skipped: ${e.message}")
+            }
         }
 
         fun showCompletionNotification(context: Context, responseText: String) {
@@ -170,34 +179,43 @@ class InferenceService : Service() {
                 stopForegroundInference()
             }
         }
-        
-        return START_STICKY
+
+        // NOT_STICKY: a system-restarted instance would arrive with a null
+        // intent, never call startForeground, and idle as a zombie — the
+        // generation it accompanied died with the process anyway.
+        return START_NOT_STICKY
     }
     
     private fun startForegroundInference() {
         isGenerating = true
-        acquireWakeLock()
-        
+
         val notification = createNotification()
         try {
+            // SPECIAL_USE is the type Google guides for compute jobs that
+            // don't fit a more-specific bucket (no sync, no media, no
+            // location). Matches the SPECIAL_USE_FGS_SUBTYPE property in
+            // AndroidManifest.xml. DATA_SYNC, used previously, gave the
+            // scheduler the wrong hint and didn't help under contention.
             ServiceCompat.startForeground(
                 this,
                 NOTIFICATION_ID,
                 notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
             )
             Log.i(TAG, "Inference service started in foreground")
+            AppEventLogger.info(component = TAG, action = "foreground_started")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start foreground service", e)
+            AppEventLogger.error(component = TAG, action = "foreground_start_failed", throwable = e)
         }
     }
-    
+
     private fun stopForegroundInference() {
         isGenerating = false
-        releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
         Log.i(TAG, "Inference service stopped")
+        AppEventLogger.info(component = TAG, action = "foreground_stopped")
     }
     
     private fun createNotificationChannel() {
@@ -226,37 +244,8 @@ class InferenceService : Service() {
             .build()
     }
     
-    private fun acquireWakeLock() {
-        if (wakeLock == null) {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = powerManager.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                "QuantLM:InferenceWakeLock"
-            ).apply {
-                setReferenceCounted(false)
-            }
-        }
-        wakeLock?.let {
-            if (!it.isHeld) {
-                // Max 30 minutes timeout for long responses
-                it.acquire(30 * 60 * 1000L)
-                Log.d(TAG, "Wake lock acquired for inference")
-            }
-        }
-    }
-    
-    private fun releaseWakeLock() {
-        wakeLock?.let {
-            if (it.isHeld) {
-                it.release()
-                Log.d(TAG, "Wake lock released")
-            }
-        }
-    }
-    
     override fun onDestroy() {
         Log.d(TAG, "Inference service destroyed")
-        releaseWakeLock()
         serviceScope.cancel()
         super.onDestroy()
     }

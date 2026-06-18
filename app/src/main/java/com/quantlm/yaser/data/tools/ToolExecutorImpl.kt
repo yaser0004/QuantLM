@@ -14,6 +14,7 @@ import android.provider.MediaStore
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import com.quantlm.yaser.domain.model.MobileTools
 import com.quantlm.yaser.domain.model.Tool
 import com.quantlm.yaser.domain.model.ToolCall
@@ -31,7 +32,8 @@ import javax.inject.Singleton
  */
 @Singleton
 class ToolExecutorImpl @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val skillRepository: com.quantlm.yaser.data.skills.SkillRepository,
 ) : ToolExecutor {
     
     companion object {
@@ -47,7 +49,9 @@ class ToolExecutorImpl @Inject constructor(
     }
     
     override suspend fun execute(call: ToolCall): ToolResult {
-        Log.d(TAG, "Executing tool: ${call.name} with args: ${call.arguments}")
+        // Log only the tool name. Arguments for make_call / send_sms / compose_email
+        // contain phone numbers and message bodies (PII) and must not be logged.
+        Log.d(TAG, "Executing tool: ${call.name}")
         
         return try {
             when (call.name) {
@@ -67,6 +71,12 @@ class ToolExecutorImpl @Inject constructor(
                 "set_timer" -> setTimer(call)
                 "open_app" -> openApp(call)
                 "get_weather" -> getWeather(call)
+                // Phase 2 (§3.9): agent-skill execution tools. Bodies live in
+                // [SkillRepository] (load_skill) and a JS/Intent runner that
+                // dispatches based on the registered skill kind.
+                "load_skill" -> loadSkill(call)
+                "run_js" -> runSkillJs(call)
+                "run_intent" -> runIntent(call)
                 else -> ToolResult(
                     toolName = call.name,
                     success = false,
@@ -680,5 +690,90 @@ class ToolExecutorImpl @Inject constructor(
         }
         
         return totalSeconds.coerceAtLeast(60) // Minimum 1 minute
+    }
+
+    // ========== Agent skill tools (§3.9) ==========
+
+    private fun loadSkill(call: ToolCall): ToolResult {
+        val name = call.arguments["name"] as? String ?: return ToolResult(
+            toolName = call.name,
+            success = false,
+            error = "Missing 'name' parameter",
+        )
+        val skill = skillRepository.enabledSkills().firstOrNull { it.name == name }
+        if (skill == null) {
+            AppEventLogger.info(
+                component = TAG,
+                action = "agent_skill_invoked",
+                details = "skill=$name, kind=unknown, success=false"
+            )
+            return ToolResult(
+                toolName = call.name,
+                success = false,
+                error = "Skill '$name' is not enabled",
+            )
+        }
+        AppEventLogger.info(
+            component = TAG,
+            action = "agent_skill_invoked",
+            details = "skill=${skill.name}, kind=${skill.kind}, success=true"
+        )
+        return ToolResult(
+            toolName = call.name,
+            success = true,
+            result = mapOf(
+                "skill_name" to skill.name,
+                "instructions" to skill.instructions,
+            ),
+        )
+    }
+
+    private fun runSkillJs(call: ToolCall): ToolResult {
+        val skillName = call.arguments["skill_name"] as? String
+        AppEventLogger.info(
+            component = TAG,
+            action = "agent_skill_invoked",
+            details = "skill=${skillName ?: "?"}, kind=JS, success=false"
+        )
+        // TODO(Sub-phase F runtime): execute the skill's `scripts/index.html`
+        // body in a hidden WebView via `quantlm_skill_run` namespace and
+        // return its `{result?, error?, image?, webview?}` payload. The shell
+        // here exists so the system prompt schema and tool-call wiring stay
+        // honest; the executor returns a clear "not implemented" until the
+        // WebView runner lands. See docs/skills.md (to be added).
+        return ToolResult(
+            toolName = call.name,
+            success = false,
+            error = "JS skill runtime is not implemented yet (skill=$skillName)",
+        )
+    }
+
+    private fun runIntent(call: ToolCall): ToolResult {
+        val intent = call.arguments["intent"] as? String ?: return ToolResult(
+            toolName = call.name,
+            success = false,
+            error = "Missing 'intent' parameter",
+        )
+        // Reuse the existing whitelisted intent helpers. The skill spec maps:
+        //  send_email -> compose_email, send_sms -> send_sms, open_url -> open_url,
+        //  open_map  -> open_map,     make_call -> make_call.
+        val rerouted = when (intent) {
+            "send_email" -> composeEmail(ToolCall("compose_email", call.arguments))
+            "send_sms" -> sendSms(ToolCall("send_sms", call.arguments))
+            "open_url" -> openUrl(ToolCall("open_url", call.arguments))
+            "open_map" -> openMap(ToolCall("open_map", call.arguments))
+            "make_call" -> makeCall(ToolCall("make_call", call.arguments))
+            else -> ToolResult(
+                toolName = call.name,
+                success = false,
+                error = "Intent '$intent' is not in the whitelist",
+            )
+        }
+        AppEventLogger.info(
+            component = TAG,
+            action = "agent_skill_invoked",
+            details = "skill=$intent, kind=NATIVE_INTENT, success=${rerouted.success}"
+        )
+        return rerouted.copy(toolName = call.name)
     }
 }

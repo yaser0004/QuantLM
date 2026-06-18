@@ -8,7 +8,10 @@ import com.quantlm.yaser.data.local.entity.MessageEntity
 import com.quantlm.yaser.domain.model.Conversation
 import com.quantlm.yaser.domain.model.GenerationStats
 import com.quantlm.yaser.domain.model.Message
+import com.quantlm.yaser.domain.model.WebSourceRef
 import com.quantlm.yaser.domain.repository.ChatRepository
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
@@ -20,6 +23,8 @@ class ChatRepositoryImpl @Inject constructor(
 
     companion object {
         private const val TAG = "ChatRepository"
+        private val gson = Gson()
+        private val webSourceListType = object : TypeToken<List<WebSourceRef>>() {}.type
     }
     
     override suspend fun createConversation(title: String, modelName: String): Long {
@@ -118,6 +123,23 @@ class ChatRepositoryImpl @Inject constructor(
         )
     }
 
+    override suspend fun insertModelChangeMarker(conversationId: Long, newModelName: String) {
+        val entity = MessageEntity(
+            conversationId = conversationId,
+            content = "",
+            isUser = false,
+            timestamp = System.currentTimeMillis(),
+            isModelChangeMarker = true,
+            markerModelName = newModelName,
+        )
+        val id = messageDao.insert(entity)
+        AppEventLogger.info(
+            component = TAG,
+            action = "model_change_marker_inserted",
+            details = "conversationId=$conversationId, newModel=$newModelName, markerId=$id"
+        )
+    }
+
     override suspend fun deleteMessagesAfter(conversationId: Long, afterMessageId: Long) {
         messageDao.deleteMessagesAfter(conversationId, afterMessageId)
         AppEventLogger.info(
@@ -174,6 +196,7 @@ class ChatRepositoryImpl @Inject constructor(
             )
         } else null
         
+        val audioPathsList = if (!audioPaths.isNullOrBlank()) parseImagePathsJson(audioPaths) else emptyList()
         return Message(
             id = id,
             conversationId = conversationId,
@@ -182,16 +205,39 @@ class ChatRepositoryImpl @Inject constructor(
             timestamp = timestamp,
             tokenCount = tokenCount,
             imagePaths = paths,
-            generationStats = stats
+            generationStats = stats,
+            thinkingContent = thinkingContent,
+            thoughtSummary = thoughtSummary,
+            audioPaths = audioPathsList,
+            sources = parseWebSourcesJson(webSources),
+            isModelChangeMarker = isModelChangeMarker,
+            markerModelName = markerModelName,
         )
     }
-    
+
+    private fun parseWebSourcesJson(json: String?): List<WebSourceRef> {
+        if (json.isNullOrBlank()) return emptyList()
+        return try {
+            gson.fromJson(json, webSourceListType) ?: emptyList()
+        } catch (e: Exception) {
+            AppEventLogger.warn(
+                component = TAG,
+                action = "parse_web_sources_failed",
+                details = "reason=${e.message ?: "unknown"}"
+            )
+            emptyList()
+        }
+    }
+
     private fun Message.toEntity(): MessageEntity {
         // Convert imagePaths list to JSON string
         val pathsJson = if (imagePaths.isNotEmpty()) {
             imagePaths.joinToString(prefix = "[\"", postfix = "\"]", separator = "\",\"")
         } else null
         
+        val audioJson = if (audioPaths.isNotEmpty()) {
+            audioPaths.joinToString(prefix = "[\"", postfix = "\"]", separator = "\",\"")
+        } else null
         return MessageEntity(
             id = id,
             conversationId = conversationId,
@@ -215,7 +261,13 @@ class ChatRepositoryImpl @Inject constructor(
             wasVisionRequest = generationStats?.wasVisionRequest ?: false,
             generationImageCount = generationStats?.imageCount ?: 0,
             generationBackend = generationStats?.backend,
-            generationModelFormat = generationStats?.modelFormat
+            generationModelFormat = generationStats?.modelFormat,
+            thinkingContent = thinkingContent,
+            thoughtSummary = thoughtSummary,
+            audioPaths = audioJson,
+            webSources = if (sources.isNotEmpty()) gson.toJson(sources) else null,
+            isModelChangeMarker = isModelChangeMarker,
+            markerModelName = markerModelName,
         )
     }
     

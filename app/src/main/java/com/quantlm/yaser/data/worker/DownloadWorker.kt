@@ -44,6 +44,7 @@ import okhttp3.Request
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.ZipFile
 
 private const val TAG = "DownloadWorker"
@@ -168,22 +169,27 @@ class DownloadWorker @AssistedInject constructor(
                 Log.i(TAG, "Fetched total size from server: $overallTotalBytes bytes")
             }
             
-            var downloadedBytesTotal = 0L
-            
+            // Single shared byte counter for ALL files in this work item. The
+            // parallel extra-file downloads each add to it as they stream, so
+            // every progress report is monotonic — the old per-file derivation
+            // made concurrent reports fight and the progress bar jump around.
+            var initialBytes = 0L
+
             // Check for already downloaded bytes (resume support)
             for (file in allFiles) {
                 val tempFile = File(modelsDir, "${file.fileName}.$TMP_FILE_EXT")
                 val finalFile = File(modelsDir, file.fileName)
                 if (finalFile.exists() && finalFile.length() > 0) {
                     // File already complete
-                    downloadedBytesTotal += finalFile.length()
+                    initialBytes += finalFile.length()
                 } else if (tempFile.exists()) {
-                    downloadedBytesTotal += tempFile.length()
+                    initialBytes += tempFile.length()
                 }
             }
-            
+            val totalProgress = AtomicLong(initialBytes)
+
             // Report initial progress
-            reportProgress(downloadedBytesTotal, overallTotalBytes, 0L, 0L)
+            reportProgress(totalProgress.get(), overallTotalBytes, 0L, 0L)
             
             // Phase 1: Download the primary model file (tracked for overall progress)
             val primaryFile = allFiles.first()
@@ -192,12 +198,11 @@ class DownloadWorker @AssistedInject constructor(
                 downloadFile = primaryFile,
                 accessToken = accessToken,
                 modelName = modelName,
-                currentTotalDownloaded = downloadedBytesTotal,
+                totalProgress = totalProgress,
                 overallTotalBytes = overallTotalBytes
             )
             when (primaryResult) {
                 is DownloadResult.Success -> {
-                    downloadedBytesTotal = primaryResult.totalDownloadedBytes
                     Log.i(TAG, "Primary file download complete: ${primaryFile.fileName}")
                     AppEventLogger.info(
                         component = TAG,
@@ -230,7 +235,7 @@ class DownloadWorker @AssistedInject constructor(
                                 downloadFile = extraFile,
                                 accessToken = accessToken,
                                 modelName = "$modelName (extra ${index + 1}/${extraFiles.size})",
-                                currentTotalDownloaded = downloadedBytesTotal,
+                                totalProgress = totalProgress,
                                 overallTotalBytes = overallTotalBytes
                             )
                         }
@@ -285,33 +290,34 @@ class DownloadWorker @AssistedInject constructor(
     }
     
     private sealed class DownloadResult {
-        data class Success(val totalDownloadedBytes: Long) : DownloadResult()
+        object Success : DownloadResult()
         data class Failure(val error: String) : DownloadResult()
     }
-    
+
     /**
-     * Download a single file with retry logic and resume support
+     * Download a single file with retry logic and resume support.
+     * Streams its byte count into [totalProgress], the work-item-wide counter
+     * shared with any concurrently downloading files.
      */
     private suspend fun downloadFileWithRetry(
         downloadFile: DownloadFile,
         accessToken: String?,
         modelName: String,
-        currentTotalDownloaded: Long,
+        totalProgress: AtomicLong,
         overallTotalBytes: Long
     ): DownloadResult {
         var retryCount = 0
         var lastError: String = "Unknown error"
-        var downloadedBytesTotal = currentTotalDownloaded
-        
+
         val destinationFile = File(modelsDir, downloadFile.fileName)
         val tempFile = File(modelsDir, "${downloadFile.fileName}.$TMP_FILE_EXT")
-        
+
         // Check if already downloaded
         if (destinationFile.exists() && destinationFile.length() > 0) {
             val expectedSize = downloadFile.sizeInBytes
             if (expectedSize <= 0 || destinationFile.length() >= expectedSize * 0.99) {
                 Log.i(TAG, "File already exists and appears complete: ${downloadFile.fileName}")
-                return DownloadResult.Success(downloadedBytesTotal)
+                return DownloadResult.Success
             }
         }
         
@@ -331,6 +337,8 @@ class DownloadWorker @AssistedInject constructor(
                 if (downloadFile.sizeInBytes > 0 && existingBytes > downloadFile.sizeInBytes) {
                     Log.w(TAG, "Temp file corrupted (larger than expected), deleting")
                     tempFile.delete()
+                    // Those bytes were counted (initial scan or earlier attempt).
+                    totalProgress.addAndGet(-existingBytes)
                     existingBytes = 0L
                 }
                 
@@ -370,11 +378,12 @@ class DownloadWorker @AssistedInject constructor(
                         if (tempFile.renameTo(destinationFile)) {
                             saveFileSizeMetadata(downloadFile.fileName, existingBytes)
                             Log.i(TAG, "Temp file was complete, renamed to final")
-                            return DownloadResult.Success(downloadedBytesTotal)
+                            return DownloadResult.Success
                         }
                     }
                     // Delete and retry
                     tempFile.delete()
+                    totalProgress.addAndGet(-existingBytes)
                     retryCount++
                     continue
                 }
@@ -428,9 +437,10 @@ class DownloadWorker @AssistedInject constructor(
                 } else if (response.code == 200) {
                     outputFile.setLength(0)
                     outputFile.seek(0)
+                    // Server ignored the Range header — the temp bytes we had
+                    // counted are being overwritten from scratch.
+                    totalProgress.addAndGet(-existingBytes)
                     existingBytes = 0L
-                    // Adjust downloadedBytesTotal if we're starting fresh
-                    downloadedBytesTotal = currentTotalDownloaded
                 }
                 
                 val inputStream = body.byteStream()
@@ -455,7 +465,8 @@ class DownloadWorker @AssistedInject constructor(
                         
                         outputFile.write(buffer, 0, bytesRead)
                         fileDownloadedBytes += bytesRead
-                        
+                        totalProgress.addAndGet(bytesRead.toLong())
+
                         val currentTime = System.currentTimeMillis()
                         if (currentTime - lastProgressUpdate > PROGRESS_UPDATE_INTERVAL_MS) {
                             // Calculate speed
@@ -466,10 +477,11 @@ class DownloadWorker @AssistedInject constructor(
                                 lastSpeedCalcTime = currentTime
                                 lastSpeedCalcBytes = fileDownloadedBytes
                             }
-                            
-                            // Calculate total downloaded across all files
-                            val totalDownloaded = currentTotalDownloaded - existingBytes + fileDownloadedBytes
-                            
+
+                            // Total downloaded across all files — the shared
+                            // counter, so concurrent reporters stay monotonic.
+                            val totalDownloaded = totalProgress.get()
+
                             // Calculate ETA
                             val remainingBytes = overallTotalBytes - totalDownloaded
                             val remainingMs = if (currentSpeed > 0) (remainingBytes * 1000) / currentSpeed else 0L
@@ -528,17 +540,14 @@ class DownloadWorker @AssistedInject constructor(
                 if (tempFile.renameTo(destinationFile)) {
                     saveFileSizeMetadata(downloadFile.fileName, finalSize)
                     Log.i(TAG, "Successfully renamed to final file: ${downloadFile.fileName}")
-                    
-                    val newTotal = currentTotalDownloaded - existingBytes + finalSize
-                    return DownloadResult.Success(newTotal)
+                    return DownloadResult.Success
                 } else {
                     // Try copy instead
                     try {
                         tempFile.copyTo(destinationFile, overwrite = true)
                         tempFile.delete()
                         saveFileSizeMetadata(downloadFile.fileName, finalSize)
-                        val newTotal = currentTotalDownloaded - existingBytes + finalSize
-                        return DownloadResult.Success(newTotal)
+                        return DownloadResult.Success
                     } catch (e: Exception) {
                         lastError = "Failed to finalize download: ${e.message}"
                         retryCount++

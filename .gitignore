@@ -5,6 +5,7 @@
 !/.gitignore
 !/README.md
 !/LICENSE
+!/.gitattributes
 
 # Keep Gradle project files
 !/build.gradle.kts
@@ -19,12 +20,14 @@
 !/app/
 !/app/**
 
-# Exclude local IDE/build caches even inside allowed folders
+# ── IDE & tool caches ──────────────────────────────────────────────────────
 /.idea/
 /.vscode/
 /.gradle/
 /.kotlin/
 /.configuration-cache/
+
+# ── Build output ───────────────────────────────────────────────────────────
 /build/
 **/build/
 **/generated/
@@ -34,7 +37,16 @@
 **/.externalNativeBuild/
 **/.cxx/
 
-# Local machine and signing secrets
+# ── AI assistant workspace state (Claude Code) ─────────────────────────────
+/.claude/
+/.remember/
+
+# ── Dev-machine resources (notes, logs, old code, research) ────────────────
+# Not required for compilation; kept locally only.
+/RESOURCES/
+/PlayStore_Resources/
+
+# ── Signing secrets & local machine config ─────────────────────────────────
 /local.properties
 /keystore.properties
 *.jks
@@ -47,7 +59,7 @@
 *.csr
 *.crt
 
-# Local logs, crash dumps, and diagnostics
+# ── Crash dumps, logs, and ephemeral dev artefacts ─────────────────────────
 *.log
 *.tmp
 *.temp
@@ -58,14 +70,13 @@
 *.hprof
 hs_err_pid*.log
 replay_pid*.log
-/build_error.txt
-/build_error_utf8.txt
-/bundle_release.log
-/file_list.txt
-/quantlm_ui.xml
-/release_crash_analysis.md
 
-# Large runtime model assets (not required for source builds)
+# ── Python tooling artefacts (llama.cpp build/test scripts) ────────────────
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# ── Large runtime model assets (not required for source builds) ────────────
 *.gguf
 *.safetensors
 app/src/main/assets/models/

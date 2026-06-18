@@ -21,17 +21,7 @@ object ModelProfileRegistry {
                 topK = 40,
                 stopTokens = listOf("<|im_end|>", "<|endoftext|>")
             )
-            modelId.contains("deepseek-r1", ignoreCase = true) -> ModelProfile(
-                family = ModelFamily.DEEPSEEK_R1,
-                defaultTemperature = 0.6f,
-                repetitionPenalty = 1.0f,
-                minP = 0.05f,
-                topP = 0.95f,
-                topK = 50,
-                stopTokens = listOf("<|im_end|>", "</think>")
-            )
-            modelId.contains("qwen", ignoreCase = true) &&
-                !modelId.contains("deepseek-r1", ignoreCase = true) -> ModelProfile(
+            modelId.contains("qwen", ignoreCase = true) -> ModelProfile(
                 family = ModelFamily.QWEN,
                 defaultTemperature = 0.4f,
                 repetitionPenalty = 1.15f,
@@ -49,14 +39,14 @@ object ModelProfileRegistry {
                 topK = 50,
                 stopTokens = listOf("<|im_end|>", "<|end|>")
             )
-            modelId.contains("llama-3.2", ignoreCase = true) -> ModelProfile(
-                family = ModelFamily.LLAMA_3_2,
-                defaultTemperature = 0.6f,
-                repetitionPenalty = 1.15f,
+            modelId.contains("gemma", ignoreCase = true) -> ModelProfile(
+                family = ModelFamily.GEMMA,
+                defaultTemperature = 1.0f,
+                repetitionPenalty = 1.0f,
                 minP = 0.05f,
-                topP = 0.9f,
-                topK = 40,
-                stopTokens = listOf("<|eot_id|>")
+                topP = 0.95f,
+                topK = 64,
+                stopTokens = listOf("<end_of_turn>", "<eos>")
             )
             else -> ModelProfile(
                 family = ModelFamily.UNKNOWN,

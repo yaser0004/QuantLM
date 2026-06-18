@@ -20,6 +20,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.testTag
 import com.quantlm.yaser.presentation.ui.common.ClickableLink
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -315,7 +316,9 @@ fun DownloadableModelItem(
                 }
                 IconButton(
                     onClick = { showModelInfo = true },
-                    modifier = Modifier.size(36.dp)
+                    modifier = Modifier
+                        .size(36.dp)
+                        .testTag("model_info_${model.id}")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Info,
@@ -387,7 +390,10 @@ fun DownloadableModelItem(
                                 Text("Delete")
                             }
                         } else {
-                            Button(onClick = onDownload) {
+                            Button(
+                                onClick = onDownload,
+                                modifier = Modifier.testTag("download_btn_${model.id}")
+                            ) {
                                 Icon(
                                     Icons.Default.Download,
                                     contentDescription = null,
@@ -444,7 +450,10 @@ fun DownloadableModelItem(
                         }
                     }
                     is DownloadState.Cancelled -> {
-                        Button(onClick = onDownload) {
+                        Button(
+                            onClick = onDownload,
+                            modifier = Modifier.testTag("download_btn_${model.id}")
+                        ) {
                             Icon(
                                 Icons.Default.Download,
                                 contentDescription = null,
@@ -570,7 +579,7 @@ fun DownloadableModelItem(
                             style = MaterialTheme.typography.bodyMedium
                         )
                     }
-                    if (model.capabilities.isNotEmpty()) {
+                    if (model.capabilitiesText.isNotEmpty()) {
                         item("capabilities") {
                             Divider()
                             Text(
@@ -578,7 +587,7 @@ fun DownloadableModelItem(
                                 style = MaterialTheme.typography.titleSmall
                             )
                             Text(
-                                text = model.capabilities,
+                                text = model.capabilitiesText,
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }

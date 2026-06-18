@@ -1,5 +1,6 @@
 package com.quantlm.yaser.data.local.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -41,5 +42,24 @@ data class MessageEntity(
     val wasVisionRequest: Boolean = false,     // Was this a vision request
     val generationImageCount: Int = 0,         // Images in prompt (assistant stats; user message paths are separate)
     val generationBackend: String? = null,     // Backend used (CPU/GPU)
-    val generationModelFormat: String? = null  // Model format (GGUF, TASK, etc.)
+    val generationModelFormat: String? = null, // Model format (GGUF, TASK, etc.)
+    // Phase 2 (§3.6): persisted thinking content extracted from <thinking> blocks.
+    val thinkingContent: String? = null,
+    val thoughtSummary: String? = null,
+    // Phase 2 (§3.8): JSON array of audio file paths attached to the message.
+    val audioPaths: String? = null,
+    // Web Search: Gson-serialized JSON array of WebSourceRef used to ground the
+    // answer. Null for offline messages and all pre-existing rows.
+    val webSources: String? = null,
+    // Model switch: marks the point in a conversation where the model changed.
+    // Invisible to the LLM; used as a context boundary and rendered as a
+    // visual separator in the chat UI. Defaults to 0 (false) for all
+    // existing rows — fully additive, no data loss.
+    @ColumnInfo(defaultValue = "0")
+    val isModelChangeMarker: Boolean = false,
+    // Nullable, no SQL default — matches MIGRATION_9_10's plain `ADD COLUMN
+    // markerModelName TEXT`. A @ColumnInfo(defaultValue = "") here would make
+    // Room's post-migration schema validation fail (entity expects DEFAULT '',
+    // migrated DB has none) and crash the app on first DB access at launch.
+    val markerModelName: String? = null,
 )
