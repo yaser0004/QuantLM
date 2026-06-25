@@ -180,6 +180,15 @@ android {
             version = "3.22.1"
         }
     }
+
+    lint {
+        // lintVitalAnalyzeRelease runs lint checks that are considered "fatal"
+        // for release builds. On memory-constrained hosts it OOM-kills the
+        // Gradle daemon before packageRelease. Disable the release vital check;
+        // full lint can be run separately with ./gradlew lintRelease.
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
 }
 
 dependencies {

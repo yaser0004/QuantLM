@@ -482,6 +482,7 @@ object AvailableModels {
         GEMMA_4_E2B_IT_LITERT,
         GEMMA_4_E4B_IT_LITERT,
         GEMMA_3_1B_IT_LITERT,
+
     )
 
     fun getModelsByCreator(): Map<String, List<DownloadableModel>> {
