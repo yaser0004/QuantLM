@@ -34,5 +34,8 @@ interface ChatRepository {
 
     suspend fun deleteMessagesAfter(conversationId: Long, afterMessageId: Long)
 
+    /** Make exactly one response version active among a regeneration group. */
+    suspend fun setActiveVersion(parentId: Long, activeId: Long)
+
     suspend fun insertModelChangeMarker(conversationId: Long, newModelName: String)
 }

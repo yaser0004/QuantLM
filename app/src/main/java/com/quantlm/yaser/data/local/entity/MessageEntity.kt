@@ -62,4 +62,14 @@ data class MessageEntity(
     // Room's post-migration schema validation fail (entity expects DEFAULT '',
     // migrated DB has none) and crash the app on first DB access at launch.
     val markerModelName: String? = null,
+    // Versioning (ChatGPT-style regenerate). The user-message id this assistant
+    // answer replies to; null for user messages, markers, and all legacy rows.
+    // Nullable INTEGER with NO @ColumnInfo default — matches MIGRATION_10_11's
+    // plain `ADD COLUMN parentMessageId INTEGER` (same rule as markerModelName).
+    val parentMessageId: Long? = null,
+    // Only the active sibling of a turn reaches the model and the UI. Defaults
+    // to 1 so every legacy/user/marker row stays visible — so this MUST carry
+    // @ColumnInfo(defaultValue = "1") to match `... INTEGER NOT NULL DEFAULT 1`.
+    @ColumnInfo(defaultValue = "1")
+    val isActiveVersion: Boolean = true,
 )

@@ -147,6 +147,35 @@ object SystemLogDiagnostics {
             }
             append("```\n\n")
 
+            // Per-session logs: each app launch's full history. Saved to private
+            // internal storage (invisible to the user otherwise), so surface them
+            // here. Newest first; the current session is always included in full,
+            // older ones until a byte budget is hit so the export can't balloon.
+            val sessionFiles = AppEventLogger.listSessionFiles(context)
+            append("## Session logs (").append(sessionFiles.size).append(" file(s))\n\n")
+            if (sessionFiles.isEmpty()) {
+                append("(none yet — session logging is off, or no file has been written this launch)\n\n")
+            } else {
+                val current = AppEventLogger.currentSessionFile()
+                var budget = 1_500_000L // ~1.5 MB of session text across the export
+                sessionFiles.forEach { f ->
+                    val isCurrent = current != null && f.absolutePath == current.absolutePath
+                    val lines = AppEventLogger.readSessionFileLines(f)
+                    append("### ").append(f.name)
+                    if (isCurrent) append("  *(current session)*")
+                    append("  — ").append(f.length() / 1024).append(" KB, ")
+                        .append(lines.size).append(" lines\n\n")
+                    if (isCurrent || budget > 0) {
+                        append("```\n")
+                        if (lines.isEmpty()) append("(empty)\n") else lines.forEach { append(it).append('\n') }
+                        append("```\n\n")
+                        budget -= f.length()
+                    } else {
+                        append("_(omitted to keep the export small)_\n\n")
+                    }
+                }
+            }
+
             append("## Recent logcat (filtered to QuantLM PID — ")
                 .append(logcatLines.size).append(" lines)\n\n")
             append("```\n")

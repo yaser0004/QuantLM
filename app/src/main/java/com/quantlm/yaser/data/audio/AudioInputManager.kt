@@ -15,6 +15,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
+import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import androidx.core.content.ContextCompat
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -75,7 +76,9 @@ class AudioInputManager @Inject constructor(
     val recordingState: StateFlow<RecordingState> = _recordingState.asStateFlow()
     
     private val audioDir = File(context.cacheDir, "audio_recordings").apply {
-        if (!exists()) mkdirs()
+        if (!exists() && !mkdirs()) {
+            AppEventLogger.warn(TAG, "audio_dir_create_failed", "path=$absolutePath")
+        }
     }
     
     /**
@@ -252,18 +255,27 @@ class AudioInputManager @Inject constructor(
             audioRecord?.startRecording()
             
             recordingThread = Thread {
-                val buffer = ByteArray(bufferSize)
-                FileOutputStream(outputFile).use { output ->
-                    while (isRecording) {
-                        val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
-                        if (read > 0) {
-                            output.write(buffer, 0, read)
+                // This runs on its own thread: an uncaught exception here would
+                // crash the whole process, so capture failures and surface them
+                // through RecordingState instead.
+                try {
+                    val buffer = ByteArray(bufferSize)
+                    FileOutputStream(outputFile).use { output ->
+                        while (isRecording) {
+                            val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                            if (read > 0) {
+                                output.write(buffer, 0, read)
+                            }
                         }
                     }
+
+                    val durationMs = System.currentTimeMillis() - recordingStartTime
+                    _recordingState.value = RecordingState.Complete(outputFile.absolutePath, durationMs)
+                } catch (e: Exception) {
+                    AppEventLogger.error(TAG, "recording_write_failed", "file=${outputFile.name}", e)
+                    isRecording = false
+                    _recordingState.value = RecordingState.Error("Recording failed: ${e.message ?: "I/O error"}")
                 }
-                
-                val durationMs = System.currentTimeMillis() - recordingStartTime
-                _recordingState.value = RecordingState.Complete(outputFile.absolutePath, durationMs)
             }
             recordingThread?.start()
             
@@ -305,11 +317,18 @@ class AudioInputManager @Inject constructor(
      * Delete all recorded audio files
      */
     fun clearRecordings() {
-        audioDir.listFiles()?.forEach { it.delete() }
+        val files = audioDir.listFiles() ?: return
+        var failures = 0
+        files.forEach { if (!it.delete()) failures++ }
+        if (failures > 0) {
+            AppEventLogger.warn(TAG, "clear_recordings_partial", "failed=$failures/${files.size}")
+        }
     }
 
     private val audioScribeDir = File(context.cacheDir, "audio_scribe").apply {
-        if (!exists()) mkdirs()
+        if (!exists() && !mkdirs()) {
+            AppEventLogger.warn(TAG, "audio_scribe_dir_create_failed", "path=$absolutePath")
+        }
     }
 
     /**
@@ -487,6 +506,11 @@ class AudioInputManager @Inject constructor(
             val dest = File(audioScribeDir, "picked_${System.currentTimeMillis()}.wav")
             writeWav(dest, pcm, TARGET_SAMPLE_RATE)
             return dest
+        } catch (e: Exception) {
+            // Corrupt/unsupported audio, missing format keys, or codec failure:
+            // degrade to null so the caller reports it rather than crashing.
+            AppEventLogger.error(TAG, "audio_decode_failed", "file=${src.name}", e)
+            return null
         } finally {
             try { codec?.stop() } catch (_: Exception) {}
             try { codec?.release() } catch (_: Exception) {}

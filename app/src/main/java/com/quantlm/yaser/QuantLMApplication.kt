@@ -18,7 +18,16 @@ import androidx.work.Configuration
 import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import com.quantlm.yaser.data.diagnostics.PerformanceSnapshotLogger
 import com.quantlm.yaser.data.inference.EngineRegistry
+import com.quantlm.yaser.data.local.GenerationPreferences
 import dagger.hilt.android.HiltAndroidApp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import javax.inject.Inject
 
 @HiltAndroidApp
@@ -32,9 +41,23 @@ class QuantLMApplication : Application(), Configuration.Provider {
 
     private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
 
+    // App-scoped scope for long-lived background collectors (settings sync).
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override fun onCreate() {
         super.onCreate()
+        // Resolve the per-session-log opt-out BEFORE init so the choice is honored
+        // from the first log line. A one-time fast DataStore read at cold start.
+        val prefs = GenerationPreferences(this)
+        AppEventLogger.persistSessionLogs = runBlocking { prefs.getSettings().first().persistSessionLogs }
         AppEventLogger.init(this)
+        // Keep the flag in sync if the user toggles it at runtime.
+        appScope.launch {
+            prefs.getSettings()
+                .map { it.persistSessionLogs }
+                .distinctUntilChanged()
+                .collect { AppEventLogger.persistSessionLogs = it }
+        }
         PerformanceSnapshotLogger.init(this)
         AppEventLogger.info(
             component = "Application",

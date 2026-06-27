@@ -18,6 +18,12 @@ interface MessageDao {
     @Update
     suspend fun update(message: MessageEntity)
 
+    // Make exactly one sibling active among a turn's response versions. SQLite
+    // evaluates (id = :activeId) to 1/0, so this both activates the chosen row
+    // and deactivates the rest in a single statement.
+    @Query("UPDATE messages SET isActiveVersion = (id = :activeId) WHERE parentMessageId = :parentId")
+    suspend fun setActiveVersion(parentId: Long, activeId: Long)
+
     @Query("DELETE FROM messages WHERE id = :id")
     suspend fun deleteById(id: Long)
 

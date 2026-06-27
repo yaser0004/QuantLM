@@ -12,6 +12,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -204,6 +205,19 @@ fun LocalModelsTab(
     ) {
         // Show model loading status banner
         if (isModelOperationInProgress) {
+            // Item 3: elapsed-time reassurance so a slow native load doesn't look
+            // frozen. Keyed on the status text so the timer resets when the target
+            // model changes. (The "(large model — may take 2–3 min)" hint is
+            // already part of getStatusMessage.)
+            val loadingStatus = modelLoadingState.getStatusMessage()
+            var longRunPhase by remember(loadingStatus) { mutableStateOf(0) }
+            LaunchedEffect(loadingStatus) {
+                longRunPhase = 0
+                delay(10_000)
+                longRunPhase = 1
+                delay(20_000)
+                longRunPhase = 2
+            }
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 color = MaterialTheme.colorScheme.primaryContainer
@@ -220,11 +234,23 @@ fun LocalModelsTab(
                         strokeWidth = 2.dp,
                         color = MaterialTheme.colorScheme.onPrimaryContainer
                     )
-                    Text(
-                        text = modelLoadingState.getStatusMessage(),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = loadingStatus,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        if (longRunPhase > 0) {
+                            Text(
+                                text = if (longRunPhase == 1)
+                                    "Still loading — large models can take a minute…"
+                                else
+                                    "Almost there — the first load is the slowest…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                            )
+                        }
+                    }
                 }
             }
         }

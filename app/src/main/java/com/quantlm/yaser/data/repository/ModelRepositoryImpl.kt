@@ -76,7 +76,16 @@ class ModelRepositoryImpl @Inject constructor(
     
     // Track which engine was used to load the current model
     private var currentEngineType: EngineType = EngineType.NONE
-    
+
+    // Item 1: identity of the model currently loaded into a native engine,
+    // including the effective hardware settings it was loaded with. Used to skip
+    // a full (slow) native unload+reload when the user re-selects the model that
+    // is already loaded with identical settings. Null when nothing is loaded.
+    private var loadedEffectiveKey: String? = null
+
+    private fun effectiveKey(c: ModelConfig): String =
+        "${c.filePath}|gpu=${c.nGpuLayers}|mode=${c.accelerationMode}|mmproj=${c.mmprojPath}|g4=${c.gemma4GpuOverride}"
+
     private enum class EngineType {
         NONE, LLAMA, MEDIAPIPE, LITERT
     }
@@ -362,6 +371,17 @@ class ModelRepositoryImpl @Inject constructor(
             config
         }
 
+        // Item 1: already-loaded short-circuit. Re-selecting the model that is
+        // already loaded with identical effective settings would otherwise do a
+        // full native unload + reload (seconds of GPU/context init). Skip it. A
+        // hardware-settings change alters the key, so a genuine reload still runs.
+        if (_loadedModel.value != null && loadedEffectiveKey == effectiveKey(effectiveConfig)) {
+            AppEventLogger.info(TAG, "load_skipped_already_loaded", "model=${effectiveConfig.name}")
+            _loadingState.value = ModelLoadingState.Loaded(effectiveConfig.name)
+            _loadingState.value = ModelLoadingState.Idle
+            return@withLock Result.success(Unit)
+        }
+
         Log.w(
             TAG,
             "GPUDIAG load: persistedHardware=" +
@@ -374,10 +394,17 @@ class ModelRepositoryImpl @Inject constructor(
         val currentModel = _loadedModel.value
         
         // Set loading state - show switching if there's a current model
+        val loadingHint = run {
+            val file = File(effectiveConfig.filePath)
+            val isLargeGguf = file.name.endsWith(".gguf", ignoreCase = true) &&
+                file.length() > 2_000_000_000L &&
+                effectiveConfig.nGpuLayers > 0
+            if (isLargeGguf) "(large model — may take 2–3 min)" else null
+        }
         if (currentModel != null) {
             _loadingState.value = ModelLoadingState.Switching(currentModel.name, effectiveConfig.name)
         } else {
-            _loadingState.value = ModelLoadingState.Loading(effectiveConfig.name)
+            _loadingState.value = ModelLoadingState.Loading(effectiveConfig.name, loadingHint)
         }
         
         // Unload any currently loaded model first
@@ -524,7 +551,8 @@ class ModelRepositoryImpl @Inject constructor(
                 incompleteCapabilities = incompleteCaps,
             )
             _loadedModel.value = modelInfo
-            
+            loadedEffectiveKey = effectiveKey(effectiveConfig)
+
             // Persist the loaded model info
             try {
                 modelPreferences.saveLoadedModel(
@@ -565,6 +593,7 @@ class ModelRepositoryImpl @Inject constructor(
             // top of this function — leaving it in _loadedModel would advertise
             // a model as loaded that no engine is actually serving.
             _loadedModel.value = null
+            loadedEffectiveKey = null
             AppEventLogger.error(
                 component = TAG,
                 action = "load_failed",
@@ -1047,7 +1076,8 @@ class ModelRepositoryImpl @Inject constructor(
         
         unloadCurrentEngine()
         _loadedModel.value = null
-        
+        loadedEffectiveKey = null
+
         // Clear the persisted model info
         try {
             modelPreferences.clearLoadedModel()

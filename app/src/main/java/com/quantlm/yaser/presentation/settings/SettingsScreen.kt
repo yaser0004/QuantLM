@@ -57,6 +57,7 @@ fun SettingsScreen(
     val mirostatEta by viewModel.mirostatEta.collectAsState()
     val samplingCapabilities by viewModel.samplingCapabilities.collectAsState()
     val isAdvancedInferenceEnabled by viewModel.isAdvancedInferenceEnabled.collectAsState()
+    val persistSessionLogs by viewModel.persistSessionLogs.collectAsState()
     val contextLength by viewModel.contextLength.collectAsState()
     val cpuThreads by viewModel.cpuThreads.collectAsState()
     val gpuLayers by viewModel.gpuLayers.collectAsState()
@@ -819,7 +820,47 @@ fun SettingsScreen(
                     }
                 }
             }
-            
+
+            // Diagnostics
+            Card(
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Diagnostics",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = "Save session logs",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "Keep a full log of every app session to help diagnose issues. Saved logs are included when you use \"Save logs to device\" (Downloads/QuantLM_Logs). Turn off to stop saving session logs.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = persistSessionLogs,
+                            onCheckedChange = viewModel::setPersistSessionLogs
+                        )
+                    }
+                }
+            }
+
             // App Info
             Card(
                 modifier = Modifier.fillMaxWidth()

@@ -210,8 +210,11 @@ class LlamaEngine @Inject constructor(
         } catch (e: Throwable) {
             // Throwable: a missing native library throws UnsatisfiedLinkError
             // (an Error, not Exception). Swallow it so engine construction
-            // never crashes; load attempts then fail cleanly per-call.
+            // never crashes; load attempts then fail cleanly per-call. Persist
+            // it to the diagnostics log — a native-init failure disables the
+            // whole GGUF path, so it must be visible in the session log.
             Log.e(TAG, "Failed to initialize native engine - native library may not be loaded", e)
+            AppEventLogger.error(TAG, "native_init_failed", "nativeLibDir=${context.applicationInfo.nativeLibraryDir}", e)
         }
     }
     
@@ -233,7 +236,7 @@ class LlamaEngine @Inject constructor(
         nThreads: Int = 4,
         nGpuLayers: Int = 0,
         contextSize: Int = 2048,
-        useFlashAttention: Boolean = false,
+        useFlashAttention: Boolean = true,
         useMlock: Boolean = false
     ): Result<Unit> = withContext(Dispatchers.IO) {
       InferenceThreadDiscipline.runWithInferencePriority {

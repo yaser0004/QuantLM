@@ -58,9 +58,9 @@ class InferenceRepositoryImpl @Inject constructor(
         // logcat). Use a length-aware schedule that backs off as the reply
         // grows. Numbers chosen to keep perceived streaming smooth for
         // short answers while preventing the long-answer jank cliff.
-        private const val STREAM_INTERVAL_SHORT_MS = 400L
-        private const val STREAM_INTERVAL_MEDIUM_MS = 800L
-        private const val STREAM_INTERVAL_LONG_MS = 1200L
+        private const val STREAM_INTERVAL_SHORT_MS = 200L
+        private const val STREAM_INTERVAL_MEDIUM_MS = 400L
+        private const val STREAM_INTERVAL_LONG_MS = 600L
         private const val STREAM_LENGTH_MEDIUM = 200   // chars
         private const val STREAM_LENGTH_LONG = 800     // chars
 
@@ -298,10 +298,16 @@ class InferenceRepositoryImpl @Inject constructor(
                 } finally {
                     bitmap.recycle()
                 }
-                Log.d(TAG, "Vision image pre-downscaled ${bounds.outWidth}x${bounds.outHeight} -> sample=$sampleSize for llama path")
+                AppEventLogger.debug(TAG, "vision_predownscale", "src=${bounds.outWidth}x${bounds.outHeight}, sample=$sampleSize")
                 temp
             } catch (e: Exception) {
-                Log.w(TAG, "Vision pre-downscale failed; using original image", e)
+                // OutOfMemory on a huge source decodes as a Throwable, not
+                // Exception — catch broadly so we always degrade to the original
+                // rather than crashing the whole inference flow.
+                AppEventLogger.error(TAG, "vision_predownscale_failed", "path=$imagePath", e)
+                null
+            } catch (t: Throwable) {
+                AppEventLogger.error(TAG, "vision_predownscale_oom", "path=$imagePath", t)
                 null
             }
         }

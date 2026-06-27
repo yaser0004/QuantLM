@@ -94,6 +94,10 @@ class SettingsViewModel @Inject constructor(
     val isAdvancedInferenceEnabled = _generationSettings.map { it.isAdvancedInferenceEnabled }
         .stateIn(viewModelScope, SharingStarted.Lazily, false)
 
+    // Diagnostics: save each session's full log to internal storage (opt-out).
+    val persistSessionLogs = _generationSettings.map { it.persistSessionLogs }
+        .stateIn(viewModelScope, SharingStarted.Lazily, true)
+
     val ttsVoiceProfile = _generationSettings.map { it.ttsVoiceProfile }
         .stateIn(viewModelScope, SharingStarted.Lazily, TtsVoiceProfile.CLASSIC_LEGACY)
 
@@ -282,6 +286,13 @@ class SettingsViewModel @Inject constructor(
         AppEventLogger.info(component = TAG, action = "set_advanced_inference", details = "enabled=$enabled")
         viewModelScope.launch {
             generationPreferences.saveAdvancedInferenceEnabled(enabled)
+        }
+    }
+
+    fun setPersistSessionLogs(enabled: Boolean) {
+        AppEventLogger.info(component = TAG, action = "set_persist_session_logs", details = "enabled=$enabled")
+        viewModelScope.launch {
+            generationPreferences.savePersistSessionLogs(enabled)
         }
     }
 

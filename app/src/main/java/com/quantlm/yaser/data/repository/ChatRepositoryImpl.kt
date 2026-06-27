@@ -148,6 +148,15 @@ class ChatRepositoryImpl @Inject constructor(
             details = "conversationId=$conversationId, afterMessageId=$afterMessageId"
         )
     }
+
+    override suspend fun setActiveVersion(parentId: Long, activeId: Long) {
+        messageDao.setActiveVersion(parentId, activeId)
+        AppEventLogger.info(
+            component = TAG,
+            action = "set_active_version",
+            details = "parentId=$parentId, activeId=$activeId"
+        )
+    }
     
     private fun ConversationEntity.toDomain() = Conversation(
         id = id,
@@ -212,6 +221,9 @@ class ChatRepositoryImpl @Inject constructor(
             sources = parseWebSourcesJson(webSources),
             isModelChangeMarker = isModelChangeMarker,
             markerModelName = markerModelName,
+            parentMessageId = parentMessageId,
+            isActiveVersion = isActiveVersion,
+            // versionIndex/versionCount are projection-only (ChatViewModel) — leave default.
         )
     }
 
@@ -268,6 +280,9 @@ class ChatRepositoryImpl @Inject constructor(
             webSources = if (sources.isNotEmpty()) gson.toJson(sources) else null,
             isModelChangeMarker = isModelChangeMarker,
             markerModelName = markerModelName,
+            parentMessageId = parentMessageId,
+            isActiveVersion = isActiveVersion,
+            // versionIndex/versionCount are transient and intentionally not persisted.
         )
     }
     

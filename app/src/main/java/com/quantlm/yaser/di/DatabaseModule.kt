@@ -39,7 +39,8 @@ object DatabaseModule {
                 ChatDatabase.MIGRATION_6_7,
                 ChatDatabase.MIGRATION_7_8,
                 ChatDatabase.MIGRATION_8_9,
-                ChatDatabase.MIGRATION_9_10
+                ChatDatabase.MIGRATION_9_10,
+                ChatDatabase.MIGRATION_10_11
             )
             .fallbackToDestructiveMigration()
             .build()

@@ -52,7 +52,7 @@ class MediaPipeEngine @Inject constructor(
     
     companion object {
         private const val TAG = "MediaPipeEngine"
-        private const val DEFAULT_MAX_TOKENS = 4096
+        private const val DEFAULT_MAX_TOKENS = 512
         private const val MIN_FALLBACK_TOKENS = 128
         private const val DEFAULT_TOP_K = 40
 
@@ -223,15 +223,14 @@ class MediaPipeEngine @Inject constructor(
 
     private fun buildMaxTokenCandidates(initialMaxTokens: Int): List<Int> {
         val normalizedInitial = initialMaxTokens.coerceAtLeast(MIN_FALLBACK_TOKENS)
-        val fallback = listOf(4096, 3072, 2048, 1536, 1024, 768, 512, 384, 256, MIN_FALLBACK_TOKENS)
-        return buildList {
-            add(normalizedInitial)
-            fallback.forEach { candidate ->
-                if (candidate < normalizedInitial) {
-                    add(candidate)
-                }
-            }
-        }.distinct()
+        // Keep at most 3 candidates: requested → half → minimum.
+        // The original 10-entry ladder could add 8–16 s of failed-allocation overhead
+        // on constrained devices; fast-failing to MIN_FALLBACK_TOKENS is always safe.
+        return listOf(
+            normalizedInitial,
+            (normalizedInitial / 2).coerceAtLeast(MIN_FALLBACK_TOKENS),
+            MIN_FALLBACK_TOKENS
+        ).distinct()
     }
     
     override suspend fun loadModel(

@@ -44,9 +44,10 @@ class SendMessageUseCase @Inject constructor(
 
     companion object {
         private const val TAG = "SendMessageUseCase"
-        // Sources injected into the prompt. Capped low to protect modest
-        // on-device context windows; remaining sources are still shown in the UI.
-        private const val MAX_PROMPT_SOURCES = 3
+        // Sources injected into the prompt. Modest bump 3->4 for better grounding;
+        // the larger prompt costs some prefill time, an accepted trade for accuracy.
+        // Remaining sources are still shown in the UI.
+        private const val MAX_PROMPT_SOURCES = 4
         // Upper word count for a message to qualify as a follow-up. A longer
         // message that merely opens with "this"/"that" is almost always a
         // self-contained question and must NOT pull in the previous topic.
@@ -70,12 +71,15 @@ class SendMessageUseCase @Inject constructor(
         // Web-augmentation caps. Keep the prompt block bounded so a long scraped
         // page can't push the model far past its context window before we even
         // start generating.
-        private const val WEB_PER_SOURCE_CHAR_CAP = 1500
-        private const val WEB_BLOCK_CHAR_CAP = 4000
+        private const val WEB_PER_SOURCE_CHAR_CAP = 1800
+        private const val WEB_BLOCK_CHAR_CAP = 5000
         // Total time allowed for the search-and-scrape phase. The repo already
         // has its own internal budgets; this is the outer wall-clock guard so a
         // hung scrape can't turn into multi-minute "freeze when sending".
-        private const val WEB_SEARCH_TOTAL_TIMEOUT_MS = 8_000L
+        // Bumped to 12 s so 4 concurrent scrapes (each up to the client's 8 s
+        // callTimeout) aren't cut off just short of completing; the long-run
+        // reassurance indicator covers the wait for the user.
+        private const val WEB_SEARCH_TOTAL_TIMEOUT_MS = 12_000L
     }
 
     /**
@@ -309,7 +313,11 @@ class SendMessageUseCase @Inject constructor(
         // minutes-long latency. Marker rows are filtered out before building
         // the template string — they must never reach the LLM.
         val contextStart = messages.indexOfLast { it.isModelChangeMarker } + 1
-        val nonMarkerMessages = messages.drop(contextStart).filter { !it.isModelChangeMarker }
+        // Only ACTIVE response versions reach the model: inactive regenerate
+        // siblings are excluded from context (markers stay active = 1, so the
+        // contextStart math above is unaffected).
+        val nonMarkerMessages = messages.drop(contextStart)
+            .filter { !it.isModelChangeMarker && it.isActiveVersion }
         val priorMessages = if (nonMarkerMessages.size > 1) {
             nonMarkerMessages.dropLast(1)
         } else {
@@ -743,6 +751,11 @@ class SendMessageUseCase @Inject constructor(
         imagePaths: List<String> = emptyList(),
         audioPaths: List<String> = emptyList(),
         isRegeneration: Boolean = false,
+        // Versioning: the user-message id this generated answer belongs to. On a
+        // normal send it's the just-inserted user message; on a regeneration the
+        // ViewModel passes the existing user message id so the new answer joins
+        // that turn's sibling group.
+        parentUserMessageId: Long? = null,
         reasoningEnabled: Boolean? = null,
         webSearchEnabled: Boolean = false
     ): Flow<GenerationState> = flow {
@@ -757,7 +770,9 @@ class SendMessageUseCase @Inject constructor(
         val backendLabel = inferenceRepository.getActiveBackendLabel()
         val modelFormatLabel = inferenceRepository.getActiveModelFormatLabel()
         
-        // Only save user message if not a regeneration
+        // Only save user message if not a regeneration. Capture its id so the
+        // assistant answer below can be tagged with its parent turn.
+        var insertedUserId: Long? = null
         if (!isRegeneration) {
             val userMsg = Message(
                 conversationId = conversationId,
@@ -766,7 +781,7 @@ class SendMessageUseCase @Inject constructor(
                 imagePaths = imagePaths,
                 audioPaths = audioPaths
             )
-            chatRepository.insertMessage(userMsg)
+            insertedUserId = chatRepository.insertMessage(userMsg)
         }
         
         emit(GenerationState.Loading)
@@ -820,6 +835,17 @@ class SendMessageUseCase @Inject constructor(
                     "web_search_timeout",
                     "budgetMs=$WEB_SEARCH_TOTAL_TIMEOUT_MS, query=$searchQuery"
                 )
+                // Degrade visibly instead of silently answering ungrounded:
+                // tell the model the web couldn't be reached (so its reply says
+                // so) and surface a brief status so the indicator doesn't just
+                // vanish. The short pause lets the collector render this before
+                // the engine's first token replaces it.
+                finalSystemPrompt = buildWebAugmentedSystemPrompt(
+                    effectiveSystemPrompt,
+                    WebSearchResult(query = searchQuery, error = "search timed out"),
+                )
+                emit(GenerationState.SearchingWeb(message = "Web search took too long — answering without it…"))
+                kotlinx.coroutines.delay(900)
             }
         }
 
@@ -1044,7 +1070,10 @@ class SendMessageUseCase @Inject constructor(
                     
                     Log.d(TAG, "=== COMPLETE: ${stats.formatGenerationTime()}, ${stats.formatTokensPerSecond()} ===")
                     
-                    // Save assistant message with generation stats
+                    // Save assistant message with generation stats. Tag it with
+                    // the user turn it answers (regeneration siblings share this
+                    // parent) and mark it the active version.
+                    val answeredUserId = if (isRegeneration) parentUserMessageId else insertedUserId
                     val assistantMsg = Message(
                         conversationId = conversationId,
                         content = fullResponse,
@@ -1053,6 +1082,8 @@ class SendMessageUseCase @Inject constructor(
                         thinkingContent = extractedThinking,
                         thoughtSummary = extractedThoughtSummary,
                         sources = webSources,
+                        parentMessageId = answeredUserId,
+                        isActiveVersion = true,
                     )
                     chatRepository.insertMessage(assistantMsg)
                     

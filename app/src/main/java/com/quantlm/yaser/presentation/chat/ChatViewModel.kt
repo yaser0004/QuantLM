@@ -887,6 +887,43 @@ class ChatViewModel @Inject constructor(
     companion object {
         private const val TAG = "ChatViewModel"
         const val MAX_IMAGES = 4 // Maximum images per message
+
+        /**
+         * Renders only the ACTIVE version of each turn and stamps the transient
+         * [Message.versionIndex]/[Message.versionCount] used by the ‹k/n› toggle.
+         * Pure (no I/O) → unit-tested directly.
+         */
+        fun projectActiveVersions(all: List<Message>): List<Message> {
+            val sibsByParent = all
+                .filter { !it.isUser && it.parentMessageId != null }
+                .groupBy { it.parentMessageId!! }
+            return all.filter { it.isActiveVersion }.map { m ->
+                val sibs = m.parentMessageId?.let { sibsByParent[it] }
+                if (sibs != null && sibs.size > 1) {
+                    val ordered = sibs.sortedWith(compareBy({ it.timestamp }, { it.id }))
+                    m.copy(
+                        versionIndex = ordered.indexOfFirst { it.id == m.id },
+                        versionCount = sibs.size,
+                    )
+                } else {
+                    m
+                }
+            }
+        }
+
+        /**
+         * The assistant answers (all versions) belonging to [userMsg]'s turn: the
+         * assistant rows after it up to the next user message. Positional, so it
+         * works for legacy null-parent answers too. Pure → unit-tested.
+         */
+        fun answerMessagesFor(all: List<Message>, userMsg: Message): List<Message> {
+            val idx = all.indexOfFirst { it.id == userMsg.id }
+            if (idx < 0) return emptyList()
+            val after = all.drop(idx + 1)
+            val nextUser = after.indexOfFirst { it.isUser }
+            val slice = if (nextUser >= 0) after.take(nextUser) else after
+            return slice.filter { !it.isUser && !it.isModelChangeMarker }
+        }
     }
     
     fun isVisionSupported(): Boolean {
@@ -946,10 +983,11 @@ class ChatViewModel @Inject constructor(
         messagesJob = viewModelScope.launch {
             chatRepository.getMessagesForConversation(conversationId)
                 .collect { messages ->
-                    _messages.value = messages
+                    _messages.value = projectActiveVersions(messages)
                 }
         }
     }
+
     
     fun sendMessage() {
         val text = _inputText.value.trim()
@@ -1044,7 +1082,16 @@ class ChatViewModel @Inject constructor(
             val baseSystemPrompt = templateSystemPrompt ?: settings.systemPrompt
             val effectiveSystemPrompt =
                 augmentWithAgentSkills(baseSystemPrompt, settings.enableAgentSkills)
-            
+
+            // Web search runs for several seconds before the use-case flow emits.
+            // Surface the indicator the instant Send is pressed (state-driven, so
+            // it can't flicker or be missed by the flow collector racing the
+            // engine's first states). The use case re-emits SearchingWeb itself;
+            // this just guarantees the indicator appears immediately and persists.
+            if (settings.enableWebSearch) {
+                _generationState.value = GenerationState.SearchingWeb()
+            }
+
             try {
                 sendMessageUseCase(
                     conversationId = conversationId,
@@ -1270,7 +1317,21 @@ class ChatViewModel @Inject constructor(
                 action = "regenerate_started",
                 details = "conversationId=$conversationId, messageId=${message.id}, imageCount=${message.imagePaths.size}"
             )
-            
+
+            // Versioning: keep the previous answer(s) as INACTIVE siblings rather
+            // than deleting them — excluded from this turn's context but still
+            // toggleable in the UI. Backfill parentMessageId so legacy answers
+            // join the group. Pre-deactivation also leaves the active message list
+            // ending at the user turn, so buildPrompt's "last message is the
+            // current turn" assumption holds.
+            val all = chatRepository.getMessagesForConversation(conversationId).first()
+            val priorAnswers = answerMessagesFor(all, message)
+            priorAnswers.forEach {
+                chatRepository.updateMessage(it.copy(parentMessageId = message.id, isActiveVersion = false))
+            }
+            inferenceRepository.resetConversation()
+
+            var succeeded = false
             try {
                 sendMessageUseCase(
                     conversationId = conversationId,
@@ -1297,6 +1358,7 @@ class ChatViewModel @Inject constructor(
                     imagePaths = message.imagePaths,
                     audioPaths = message.audioPaths,
                     isRegeneration = true, // Don't create new user message
+                    parentUserMessageId = message.id, // new answer joins this turn's version group
                     reasoningEnabled = if (ModelCapability.REASONING in _loadedModelCapabilities.value) {
                         settings.enableThinking
                     } else {
@@ -1312,6 +1374,7 @@ class ChatViewModel @Inject constructor(
 
                     when (state) {
                         is GenerationState.Complete -> {
+                            succeeded = true // a new active version was persisted
                             AppEventLogger.info(
                                 component = TAG,
                                 action = "regenerate_completed",
@@ -1351,10 +1414,20 @@ class ChatViewModel @Inject constructor(
                 _generationState.value = GenerationState.Error("Error: ${e.message}")
                 kotlinx.coroutines.delay(3000)
                 _generationState.value = GenerationState.Idle
+            } finally {
+                // Guarantee exactly one active version on every exit: if the
+                // regeneration didn't complete (error/cancel/exception), no new
+                // active answer was inserted — re-activate the most recent prior
+                // sibling so the turn never renders with zero answers.
+                if (!succeeded) {
+                    priorAnswers.maxByOrNull { it.timestamp }?.let {
+                        chatRepository.setActiveVersion(message.id, it.id)
+                    }
+                }
             }
         }
     }
-    
+
     private fun updateConversationTitle(conversationId: Long, userMessage: String) {
         viewModelScope.launch {
             try {
@@ -1541,39 +1614,51 @@ class ChatViewModel @Inject constructor(
     fun deleteConversation(conversationId: Long) {
         viewModelScope.launch {
             AppEventLogger.info(component = TAG, action = "delete_conversation_requested", details = "conversationId=$conversationId")
-            chatRepository.deleteConversation(conversationId)
-            
-            // If we deleted the current conversation, create a new one
-            if (_currentConversationId.value == conversationId) {
-                startNewConversation()
+            try {
+                chatRepository.deleteConversation(conversationId)
+
+                // If we deleted the current conversation, create a new one
+                if (_currentConversationId.value == conversationId) {
+                    startNewConversation()
+                }
+            } catch (e: Exception) {
+                AppEventLogger.error(TAG, "delete_conversation_failed", "conversationId=$conversationId", e)
             }
         }
     }
 
     fun renameConversation(conversationId: Long, newTitle: String) {
         viewModelScope.launch {
-            val conv = chatRepository.getConversation(conversationId) ?: return@launch
             val t = newTitle.trim()
             if (t.isEmpty()) return@launch
-            chatRepository.updateConversation(
-                conv.copy(title = t, updatedAt = System.currentTimeMillis())
-            )
-            AppEventLogger.info(
-                component = TAG,
-                action = "rename_conversation",
-                details = "conversationId=$conversationId, titleLength=${t.length}"
-            )
+            try {
+                val conv = chatRepository.getConversation(conversationId) ?: return@launch
+                chatRepository.updateConversation(
+                    conv.copy(title = t, updatedAt = System.currentTimeMillis())
+                )
+                AppEventLogger.info(
+                    component = TAG,
+                    action = "rename_conversation",
+                    details = "conversationId=$conversationId, titleLength=${t.length}"
+                )
+            } catch (e: Exception) {
+                AppEventLogger.error(TAG, "rename_conversation_failed", "conversationId=$conversationId", e)
+            }
         }
     }
 
     fun deleteMessage(message: Message) {
         viewModelScope.launch {
-            chatRepository.deleteMessage(message.id)
-            AppEventLogger.info(
-                component = TAG,
-                action = "delete_message",
-                details = "messageId=${message.id}, conversationId=${message.conversationId}"
-            )
+            try {
+                chatRepository.deleteMessage(message.id)
+                AppEventLogger.info(
+                    component = TAG,
+                    action = "delete_message",
+                    details = "messageId=${message.id}, conversationId=${message.conversationId}"
+                )
+            } catch (e: Exception) {
+                AppEventLogger.error(TAG, "delete_message_failed", "messageId=${message.id}", e)
+            }
         }
     }
 
@@ -1610,17 +1695,38 @@ class ChatViewModel @Inject constructor(
                 details = "assistantMessageId=${assistantMessage.id}, conversationId=${assistantMessage.conversationId}"
             )
             stopGeneration()
-            // See editAndResendUserMessage: settle the in-flight turn before
-            // deleting the assistant message it might still be writing.
+            // Settle the in-flight turn before reProcessMessage rewrites versions.
             generationJob?.cancelAndJoin()
             val all = chatRepository.getMessagesForConversation(assistantMessage.conversationId).first()
             val userMsg = all.takeWhile { it.id != assistantMessage.id }
                 .lastOrNull { it.isUser } ?: return@launch
-            chatRepository.deleteMessage(assistantMessage.id)
-            // Phase 1 (Subphase G): regenerating means we're discarding the
-            // previously decoded assistant tokens; drop engine state.
-            inferenceRepository.resetConversation()
+            // Don't delete: reProcessMessage now deactivates the old answer (keeps
+            // it as a toggleable sibling), resets the KV cache, and excludes it
+            // from the new turn's context.
             reProcessMessage(userMsg)
+        }
+    }
+
+    /** Switch which response version of a turn is active. [dir] = -1 / +1. */
+    fun switchMessageVersion(message: Message, dir: Int) {
+        val parentId = message.parentMessageId ?: return
+        viewModelScope.launch {
+            val sibs = chatRepository.getMessagesForConversation(message.conversationId).first()
+                .filter { it.parentMessageId == parentId }
+                .sortedWith(compareBy({ it.timestamp }, { it.id }))
+            if (sibs.size < 2) return@launch
+            val cur = sibs.indexOfFirst { it.id == message.id }
+            if (cur < 0) return@launch
+            val next = (cur + dir).coerceIn(0, sibs.size - 1) // clamp, no wrap
+            if (next == cur) return@launch
+            AppEventLogger.info(
+                component = TAG,
+                action = "switch_message_version",
+                details = "parentId=$parentId, from=$cur, to=$next, count=${sibs.size}"
+            )
+            chatRepository.setActiveVersion(parentId, sibs[next].id)
+            // Active context changed → engine KV cache is now stale.
+            inferenceRepository.resetConversation()
         }
     }
 }

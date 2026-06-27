@@ -9,7 +9,7 @@ sealed class ModelLoadingState {
     object Idle : ModelLoadingState()
     
     /** Model is being loaded into memory */
-    data class Loading(val modelName: String) : ModelLoadingState()
+    data class Loading(val modelName: String, val hint: String? = null) : ModelLoadingState()
     
     /** Model is being unloaded from memory */
     data class Unloading(val modelName: String? = null) : ModelLoadingState()
@@ -26,7 +26,7 @@ sealed class ModelLoadingState {
     /** Get a human-readable description of the current state */
     fun getStatusMessage(): String = when (this) {
         is Idle -> ""
-        is Loading -> "Loading $modelName..."
+        is Loading -> if (hint != null) "Loading $modelName… $hint" else "Loading $modelName..."
         is Unloading -> modelName?.let { "Unloading $it..." } ?: "Unloading model..."
         is Switching -> "Switching to $toModel..."
         is Loaded -> "$modelName loaded"

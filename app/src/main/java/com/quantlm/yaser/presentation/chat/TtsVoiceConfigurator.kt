@@ -14,12 +14,21 @@ object TtsVoiceConfigurator {
     private const val CLASSIC_RATE = 1.0f
     private const val CLASSIC_PITCH = 1.0f
 
+    /**
+     * Returns false when the device has no usable voice data for the chosen
+     * language (after falling back to US English) — in that case speak() will
+     * complete without producing any audio, so the caller must tell the user to
+     * install voice data rather than leaving the button silently "playing".
+     */
     @Suppress("UNUSED_PARAMETER")
     fun apply(tts: TextToSpeech, _profile: TtsVoiceProfile): Boolean {
         val locale = Locale.getDefault()
-        val langResult = tts.setLanguage(locale)
+        var langResult = tts.setLanguage(locale)
         if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-            tts.setLanguage(Locale.US)
+            langResult = tts.setLanguage(Locale.US)
+        }
+        if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+            return false
         }
 
         tts.setSpeechRate(CLASSIC_RATE)

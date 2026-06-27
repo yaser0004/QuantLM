@@ -46,6 +46,9 @@ class GenerationPreferences(private val context: Context) {
         // Web Search toggle: when true, every message is answered using freshly
         // scraped web context. Defaults to false — fully offline until opted in.
         private val ENABLE_WEB_SEARCH = booleanPreferencesKey("enable_web_search")
+        // Diagnostics: persist each app session's full log to internal storage.
+        // Opt-out (defaults to true): turning it off stops per-session files.
+        private val PERSIST_SESSION_LOGS = booleanPreferencesKey("persist_session_logs")
         private val CONTEXT_LENGTH = intPreferencesKey("context_length")
         private val CPU_THREADS = intPreferencesKey("cpu_threads")
         private val GPU_LAYERS = intPreferencesKey("gpu_layers")
@@ -125,6 +128,9 @@ class GenerationPreferences(private val context: Context) {
         // context for every message. When false the app never touches the
         // network for chat. Works with every model (prompt-level augmentation).
         val enableWebSearch: Boolean = false,
+        // Diagnostics: when true (default), each app session's full log is saved
+        // to internal storage. The user can opt out in Settings.
+        val persistSessionLogs: Boolean = true,
     )
 
     data class HardwareSettings(
@@ -158,6 +164,7 @@ class GenerationPreferences(private val context: Context) {
             preferences[ENABLE_SPECULATIVE_DECODING] = settings.enableSpeculativeDecoding
             preferences[ENABLE_AGENT_SKILLS] = settings.enableAgentSkills
             preferences[ENABLE_WEB_SEARCH] = settings.enableWebSearch
+            preferences[PERSIST_SESSION_LOGS] = settings.persistSessionLogs
         }
         AppEventLogger.info(
             component = TAG,
@@ -219,6 +226,7 @@ class GenerationPreferences(private val context: Context) {
                 enableSpeculativeDecoding = preferences[ENABLE_SPECULATIVE_DECODING] ?: false,
                 enableAgentSkills = preferences[ENABLE_AGENT_SKILLS] ?: false,
                 enableWebSearch = preferences[ENABLE_WEB_SEARCH] ?: false,
+                persistSessionLogs = preferences[PERSIST_SESSION_LOGS] ?: true,
             )
         }
     }
@@ -435,5 +443,10 @@ class GenerationPreferences(private val context: Context) {
     suspend fun saveEnableWebSearch(value: Boolean) {
         context.settingsDataStore.edit { it[ENABLE_WEB_SEARCH] = value }
         AppEventLogger.info(component = TAG, action = "save_enable_web_search", details = "value=$value")
+    }
+
+    suspend fun savePersistSessionLogs(value: Boolean) {
+        context.settingsDataStore.edit { it[PERSIST_SESSION_LOGS] = value }
+        AppEventLogger.info(component = TAG, action = "save_persist_session_logs", details = "value=$value")
     }
 }

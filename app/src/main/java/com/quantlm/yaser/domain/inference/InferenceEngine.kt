@@ -181,7 +181,7 @@ data class InferenceConfig(
     val nGpuLayers: Int = 0,
     val contextSize: Int = 2048,
     val useMlock: Boolean = false,
-    val useFlashAttention: Boolean = false
+    val useFlashAttention: Boolean = true
 )
 
 /**

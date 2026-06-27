@@ -49,6 +49,8 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
@@ -114,6 +116,7 @@ import com.quantlm.yaser.domain.model.ToolResult
 import com.quantlm.yaser.domain.model.MobileTools
 import com.quantlm.yaser.domain.model.VisionQuickAction
 import com.quantlm.yaser.domain.model.WebSourceRef
+import com.quantlm.yaser.data.diagnostics.AppEventLogger
 import com.quantlm.yaser.domain.tts.TtsVoiceProfile
 import com.quantlm.yaser.data.audio.AudioInputState
 import com.quantlm.yaser.presentation.models.ModelDownloadViewModel
@@ -410,6 +413,9 @@ fun ChatThreadScaffold(
     val modelDownloadViewModel: ModelDownloadViewModel = hiltViewModel()
     val clipboardManager = LocalClipboardManager.current
     val messages by viewModel.messages.collectAsState()
+    // Regenerate is offered only on the latest turn (bounded scope); version
+    // arrows still appear on any turn with siblings.
+    val lastUserId = remember(messages) { messages.lastOrNull { it.isUser }?.id }
     // Narrowed reads: collecting the raw GenerationState here meant the whole
     // scaffold's snapshot scope was invalidated on every streaming-token
     // emission (~2.5×/sec). These derived flows only emit when the *predicate*
@@ -456,6 +462,8 @@ fun ChatThreadScaffold(
     val loadedModelCapabilities by viewModel.loadedModelCapabilities.collectAsState()
     val liveThinkingContent by viewModel.liveThinkingContent.collectAsState()
     val liveThoughtSummary by viewModel.liveThoughtSummary.collectAsState()
+    // One shared TTS engine for every bubble in the thread (see [TtsController]).
+    val ttsController = rememberTtsController(generationSettings.ttsVoiceProfile)
     val listState = rememberLazyListState()
     var autoScrollEnabled by remember { mutableStateOf(true) }
     val isAtBottom by remember {
@@ -955,27 +963,37 @@ fun ChatThreadScaffold(
                                 editDraft = sheetMsg.content
                             }
                         )
-                        ListItem(
-                            headlineContent = { Text("Regenerate") },
-                            leadingContent = {
-                                Icon(Icons.Default.Refresh, contentDescription = null)
-                            },
-                            modifier = Modifier.clickable {
-                                messageSheetMessage = null
-                                viewModel.reProcessMessage(sheetMsg)
-                            }
-                        )
+                        // Regenerate only on the latest turn (bounded scope).
+                        if (sheetMsg.id == lastUserId) {
+                            ListItem(
+                                headlineContent = { Text("Regenerate") },
+                                leadingContent = {
+                                    Icon(Icons.Default.Refresh, contentDescription = null)
+                                },
+                                modifier = Modifier.clickable {
+                                    messageSheetMessage = null
+                                    viewModel.reProcessMessage(sheetMsg)
+                                }
+                            )
+                        }
                     } else {
-                        ListItem(
-                            headlineContent = { Text("Regenerate") },
-                            leadingContent = {
-                                Icon(Icons.Default.Refresh, contentDescription = null)
-                            },
-                            modifier = Modifier.clickable {
-                                messageSheetMessage = null
-                                viewModel.regenerateAssistantResponse(sheetMsg)
-                            }
-                        )
+                        // Assistant answer: regenerate only if it belongs to the
+                        // latest turn (no user message after it).
+                        val sheetIdx = messages.indexOfFirst { it.id == sheetMsg.id }
+                        val isLatestTurnAnswer = sheetIdx >= 0 &&
+                            messages.drop(sheetIdx + 1).none { it.isUser }
+                        if (isLatestTurnAnswer) {
+                            ListItem(
+                                headlineContent = { Text("Regenerate") },
+                                leadingContent = {
+                                    Icon(Icons.Default.Refresh, contentDescription = null)
+                                },
+                                modifier = Modifier.clickable {
+                                    messageSheetMessage = null
+                                    viewModel.regenerateAssistantResponse(sheetMsg)
+                                }
+                            )
+                        }
                     }
                     ListItem(
                         headlineContent = {
@@ -1170,14 +1188,17 @@ fun ChatThreadScaffold(
                             }
                             MessageBubble(
                                 message = message,
-                                onReResponse = if (message.isUser) {
+                                ttsController = ttsController,
+                                onReResponse = if (message.isUser && message.id == lastUserId) {
                                     { viewModel.reProcessMessage(message) }
+                                } else null,
+                                onSwitchVersion = if (!message.isUser && message.versionCount > 1) {
+                                    { dir -> viewModel.switchMessageVersion(message, dir) }
                                 } else null,
                                 style = bubbleStyle,
                                 onLongPress = if (bubbleStyle == MessageBubbleStyle.Modern) {
                                     { messageSheetMessage = message }
                                 } else null,
-                                ttsVoiceProfile = generationSettings.ttsVoiceProfile
                             )
                         }
 
@@ -1492,20 +1513,6 @@ fun ChatScreen(
                             }
                         }
                     }
-
-                    IconButton(
-                        onClick = onNavigateToDownloads,
-                        modifier = Modifier
-                            .size(46.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.surface)
-                    ) {
-                        Icon(
-                            Icons.Default.Memory,
-                            contentDescription = "Models",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
                 }
             }
         },
@@ -1612,55 +1619,138 @@ private fun MessageSourcesSection(
     }
 }
 
-@Composable
-fun MessageBubble(
-    message: Message,
-    onReResponse: (() -> Unit)? = null,
-    style: MessageBubbleStyle = MessageBubbleStyle.Classic,
-    onLongPress: (() -> Unit)? = null,
-    ttsVoiceProfile: TtsVoiceProfile = TtsVoiceProfile.CLASSIC_LEGACY
+/**
+ * One [TextToSpeech] for the whole chat thread, hoisted out of [MessageBubble].
+ *
+ * The old code created a TextToSpeech *inside* every MessageBubble: a LazyColumn
+ * with N visible messages spun up N engine connections, each with its own async
+ * onInit. Tapping a freshly-composed bubble called speak() before that bubble's
+ * engine finished initialising, so speak() no-op'd while the button's state was
+ * flipped to "on" unconditionally (no ready-guard, return value ignored) — the
+ * button stuck "on" and produced no audio. A single, eagerly-initialised engine
+ * with a ready-guard and return-value check is the root-cause fix.
+ */
+class TtsController(
+    appContext: Context,
+    private val onStatus: (String) -> Unit,
 ) {
-    val context = LocalContext.current
-    val appContext = context.applicationContext
-    val clipboardManager = LocalClipboardManager.current
-    var showCopiedSnackbar by remember { mutableStateOf(false) }
-    var showStatsDialog by remember { mutableStateOf(false) }
-    var isSpeaking by remember { mutableStateOf(false) }
+    private val readyState = mutableStateOf(false)
+    val ready: State<Boolean> = readyState
 
-    val ttsReady = remember { mutableStateOf(false) }
-    val tts = remember(appContext) {
-        TextToSpeech(appContext) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                ttsReady.value = true
-            }
+    // Utterance id ("message_<id>") currently playing, or null. Each bubble
+    // derives its own speaking state by comparing against this.
+    private val speakingState = mutableStateOf<String?>(null)
+    val speakingUtteranceId: State<String?> = speakingState
+
+    private val tts = TextToSpeech(appContext) { status ->
+        if (status == TextToSpeech.SUCCESS) {
+            readyState.value = true
+        } else {
+            AppEventLogger.error("TTS", "init_failed", "status=$status")
+            onStatus("Text-to-speech is unavailable on this device.")
         }
     }
 
-    LaunchedEffect(ttsReady.value, ttsVoiceProfile) {
-        if (ttsReady.value) {
-            TtsVoiceConfigurator.apply(tts, ttsVoiceProfile)
-        }
-    }
-
-    DisposableEffect(tts) {
-        onDispose {
-            tts.stop()
-            tts.shutdown()
-        }
-    }
-
-    LaunchedEffect(tts) {
+    init {
         tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {}
-            override fun onDone(utteranceId: String?) {
-                isSpeaking = false
-            }
+            override fun onDone(utteranceId: String?) = clearIfCurrent(utteranceId)
             override fun onError(utteranceId: String?) {
-                isSpeaking = false
+                AppEventLogger.warn("TTS", "utterance_error", "id=$utteranceId")
+                clearIfCurrent(utteranceId)
             }
         })
     }
-    
+
+    // Listener callbacks arrive on a binder thread; Compose snapshot state is
+    // safe to write from any thread.
+    private fun clearIfCurrent(utteranceId: String?) {
+        if (speakingState.value == utteranceId) speakingState.value = null
+    }
+
+    fun applyVoice(profile: TtsVoiceProfile) {
+        if (!readyState.value) return
+        val usable = try {
+            TtsVoiceConfigurator.apply(tts, profile)
+        } catch (t: Throwable) {
+            AppEventLogger.error("TTS", "voice_config_failed", throwable = t)
+            false
+        }
+        if (!usable) {
+            AppEventLogger.warn("TTS", "voice_data_missing")
+            onStatus("Text-to-speech voice data isn't installed for your language.")
+        }
+    }
+
+    /** Start speaking [text], or stop if [utteranceId] is already playing. */
+    fun toggle(utteranceId: String, text: String) {
+        if (speakingState.value == utteranceId) {
+            stop()
+            return
+        }
+        if (!readyState.value) {
+            onStatus("Text-to-speech is still starting up — try again in a moment.")
+            return
+        }
+        val result = tts.speak(text, TextToSpeech.QUEUE_FLUSH, android.os.Bundle(), utteranceId)
+        if (result == TextToSpeech.SUCCESS) {
+            speakingState.value = utteranceId
+        } else {
+            AppEventLogger.error("TTS", "speak_failed", "result=$result")
+            onStatus("Couldn't play audio for this message.")
+        }
+    }
+
+    fun stop() {
+        tts.stop()
+        speakingState.value = null
+    }
+
+    fun shutdown() {
+        tts.stop()
+        tts.shutdown()
+    }
+}
+
+/** Builds (once) and owns a [TtsController] scoped to the calling composable. */
+@Composable
+fun rememberTtsController(voiceProfile: TtsVoiceProfile): TtsController {
+    val appContext = LocalContext.current.applicationContext
+    val mainHandler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
+    val controller = remember {
+        TtsController(appContext) { msg ->
+            mainHandler.post { Toast.makeText(appContext, msg, Toast.LENGTH_SHORT).show() }
+        }
+    }
+    // Apply the voice once the engine is ready, and whenever the profile changes.
+    val ready by controller.ready
+    LaunchedEffect(ready, voiceProfile) {
+        if (ready) controller.applyVoice(voiceProfile)
+    }
+    DisposableEffect(Unit) {
+        onDispose { controller.shutdown() }
+    }
+    return controller
+}
+
+@Composable
+fun MessageBubble(
+    message: Message,
+    ttsController: TtsController,
+    onReResponse: (() -> Unit)? = null,
+    onSwitchVersion: ((Int) -> Unit)? = null,
+    style: MessageBubbleStyle = MessageBubbleStyle.Classic,
+    onLongPress: (() -> Unit)? = null,
+) {
+    val clipboardManager = LocalClipboardManager.current
+    var showCopiedSnackbar by remember { mutableStateOf(false) }
+    var showStatsDialog by remember { mutableStateOf(false) }
+
+    // TTS is owned by the shared [TtsController]; this bubble is "speaking" iff
+    // the controller is currently voicing this message's utterance.
+    val utteranceId = "message_${message.id}"
+    val isSpeaking = ttsController.speakingUtteranceId.value == utteranceId
+
     // Show stats dialog when clicked (only for AI messages with stats)
     if (showStatsDialog && message.hasGenerationStats) {
         GenerationStatsDialog(
@@ -1710,12 +1800,19 @@ fun MessageBubble(
             Column(
                 horizontalAlignment = if (message.isUser) Alignment.End else Alignment.Start
             ) {
+            // Item 4: assistant replies render flat (no bubble) — plain text on
+            // the background, full width, left-aligned — while user messages keep
+            // the rounded bubble. Achieved by making the Surface transparent and
+            // full-width for the assistant rather than restructuring the content.
             Surface(
                 shape = bubbleShape,
-                color = bubbleColor,
-                tonalElevation = tonalElev,
+                color = if (message.isUser) bubbleColor else Color.Transparent,
+                tonalElevation = if (message.isUser) tonalElev else 0.dp,
                 modifier = Modifier
-                    .widthIn(max = maxBubbleWidth)
+                    .then(
+                        if (message.isUser) Modifier.widthIn(max = maxBubbleWidth)
+                        else Modifier.fillMaxWidth()
+                    )
                     .then(
                         if (onLongPress != null) {
                             Modifier.combinedClickable(
@@ -1726,7 +1823,10 @@ fun MessageBubble(
                     )
             ) {
                 Column(
-                    modifier = Modifier.padding(12.dp)
+                    modifier = Modifier.padding(
+                        horizontal = if (message.isUser) 12.dp else 2.dp,
+                        vertical = if (message.isUser) 12.dp else 4.dp,
+                    )
                 ) {
                     // Show attached images if present (supports multiple)
                     if (message.hasImages) {
@@ -1859,21 +1959,7 @@ fun MessageBubble(
                 
                 // Speaker (TTS) button
                 IconButton(
-                    onClick = {
-                        if (isSpeaking) {
-                            tts.stop()
-                            isSpeaking = false
-                        } else {
-                            val params = android.os.Bundle()
-                            tts.speak(
-                                message.content,
-                                TextToSpeech.QUEUE_FLUSH,
-                                params,
-                                "message_${message.id}"
-                            )
-                            isSpeaking = true
-                        }
-                    },
+                    onClick = { ttsController.toggle(utteranceId, message.content) },
                     modifier = buttonModifier
                 ) {
                     val iconTint = if (isSpeaking) {
@@ -1900,6 +1986,45 @@ fun MessageBubble(
                             contentDescription = "Regenerate response",
                             modifier = Modifier.size(14.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                // Version toggle ‹ k/n › for assistant turns with >1 regenerated
+                // version. Arrows clamp at the ends (greyed, no wrap).
+                if (!message.isUser && message.versionCount > 1 && onSwitchVersion != null) {
+                    val atStart = message.versionIndex <= 0
+                    val atEnd = message.versionIndex >= message.versionCount - 1
+                    IconButton(
+                        onClick = { onSwitchVersion(-1) },
+                        enabled = !atStart,
+                        modifier = buttonModifier
+                    ) {
+                        Icon(
+                            Icons.Default.KeyboardArrowLeft,
+                            contentDescription = "Previous version",
+                            modifier = Modifier.size(16.dp),
+                            tint = if (atStart) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        text = "${message.versionIndex + 1}/${message.versionCount}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                    )
+                    IconButton(
+                        onClick = { onSwitchVersion(1) },
+                        enabled = !atEnd,
+                        modifier = buttonModifier
+                    ) {
+                        Icon(
+                            Icons.Default.KeyboardArrowRight,
+                            contentDescription = "Next version",
+                            modifier = Modifier.size(16.dp),
+                            tint = if (atEnd) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                            else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -2407,20 +2532,12 @@ fun StreamingMessageBubble(
         MessageBubbleStyle.Classic -> RoundedCornerShape(16.dp)
         MessageBubbleStyle.Modern -> RoundedCornerShape(16.dp)
     }
-    val bubbleColor = when (style) {
-        MessageBubbleStyle.Classic -> MaterialTheme.colorScheme.tertiaryContainer
-        MessageBubbleStyle.Modern -> MaterialTheme.colorScheme.surfaceVariant
-    }
     val contentColor = when (style) {
         MessageBubbleStyle.Classic -> MaterialTheme.colorScheme.onTertiaryContainer
         MessageBubbleStyle.Modern -> MaterialTheme.colorScheme.onSurface
     }
 
-    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-        val maxBubbleWidth = when (style) {
-            MessageBubbleStyle.Classic -> 280.dp
-            MessageBubbleStyle.Modern -> maxWidth * 0.78f
-        }
+    Box(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.Start
@@ -2428,13 +2545,14 @@ fun StreamingMessageBubble(
             Column(
                 horizontalAlignment = Alignment.Start
             ) {
+            // Item 4: streaming assistant reply is flat (no bubble), full width.
             Surface(
                 shape = bubbleShape,
-                color = bubbleColor,
-                modifier = Modifier.widthIn(max = maxBubbleWidth)
+                color = Color.Transparent,
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
-                    modifier = Modifier.padding(12.dp)
+                    modifier = Modifier.padding(horizontal = 2.dp, vertical = 4.dp)
                 ) {
                     Row(verticalAlignment = Alignment.Bottom) {
                         Text(
@@ -2619,6 +2737,22 @@ private fun PrefillPhaseIndicator(
     icons: List<androidx.compose.ui.graphics.vector.ImageVector>,
     style: MessageBubbleStyle,
 ) {
+    // Long-run reassurance: when a phase runs longer than usual it's still
+    // working, not broken. Escalate the wording after timed thresholds; the
+    // timer resets whenever the base [message] changes.
+    var longRunPhase by remember(message) { mutableStateOf(0) }
+    LaunchedEffect(message) {
+        longRunPhase = 0
+        delay(12_000)
+        longRunPhase = 1
+        delay(18_000)
+        longRunPhase = 2
+    }
+    val shownMessage = when (longRunPhase) {
+        0 -> message
+        1 -> "Still working — this is taking longer than usual…"
+        else -> "Almost there — thanks for your patience…"
+    }
     val bubbleColor = when (style) {
         MessageBubbleStyle.Classic -> MaterialTheme.colorScheme.tertiaryContainer
         MessageBubbleStyle.Modern -> MaterialTheme.colorScheme.surfaceVariant
@@ -2663,7 +2797,7 @@ private fun PrefillPhaseIndicator(
                     }
                 }
                 Text(
-                    text = message,
+                    text = shownMessage,
                     style = MaterialTheme.typography.bodyMedium,
                     color = contentColor,
                 )
@@ -2677,6 +2811,15 @@ fun ThinkingIndicator(
     isVisionQuery: Boolean = false,
     style: MessageBubbleStyle = MessageBubbleStyle.Classic
 ) {
+    // Prefill (time-to-first-token) can be long on big models. After a
+    // threshold, reassure the user it's still working rather than frozen.
+    var longRunPhase by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        delay(12_000)
+        longRunPhase = 1
+        delay(18_000)
+        longRunPhase = 2
+    }
     val bubbleShape = when (style) {
         MessageBubbleStyle.Classic -> RoundedCornerShape(16.dp)
         MessageBubbleStyle.Modern -> RoundedCornerShape(16.dp)
@@ -2700,9 +2843,11 @@ fun ThinkingIndicator(
                 color = bubbleColor,
                 modifier = Modifier.widthIn(max = maxBubbleWidth)
             ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
             if (style == MessageBubbleStyle.Modern) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -2726,16 +2871,26 @@ fun ThinkingIndicator(
                     }
                 }
             } else {
-                Box(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer
-                    )
-                }
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+            }
+            if (longRunPhase > 0) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = if (longRunPhase == 1)
+                        "Still working — this is taking longer than usual…"
+                    else
+                        "Almost there — thanks for your patience…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = when (style) {
+                        MessageBubbleStyle.Classic -> MaterialTheme.colorScheme.onTertiaryContainer
+                        MessageBubbleStyle.Modern -> MaterialTheme.colorScheme.onSurface
+                    }
+                )
+            }
             }
         }
         }
@@ -2744,55 +2899,39 @@ fun ThinkingIndicator(
 
 @Composable
 fun ErrorMessageBubble(errorMessage: String) {
-    val bubbleShape = RoundedCornerShape(16.dp)
-    val bubbleColor = MaterialTheme.colorScheme.errorContainer
-    val contentColor = MaterialTheme.colorScheme.onErrorContainer
-    
+    // Item 4: flat (no bubble); error color carries the signal on the background.
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.Start
     ) {
-        Surface(
-            shape = bubbleShape,
-            color = bubbleColor,
-            modifier = Modifier.widthIn(max = 280.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(12.dp)
-            ) {
-                Text(
-                    text = errorMessage,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = contentColor
-                )
-            }
-        }
+        Text(
+            text = errorMessage,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 2.dp, vertical = 4.dp)
+        )
     }
 }
 
 @Composable
 fun CancelledMessageBubble() {
-    val bubbleShape = RoundedCornerShape(16.dp)
-    val bubbleColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-    
+    // Item 4: flat (no bubble) — muted italic text on the background.
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.Start
     ) {
-        Surface(
-            shape = bubbleShape,
-            color = bubbleColor,
-            modifier = Modifier.widthIn(max = 280.dp)
-        ) {
-            Text(
-                text = "Response cancelled by user",
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    fontStyle = FontStyle.Italic
-                ),
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                modifier = Modifier.padding(12.dp)
-            )
-        }
+        Text(
+            text = "Response cancelled by user",
+            style = MaterialTheme.typography.bodyMedium.copy(
+                fontStyle = FontStyle.Italic
+            ),
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 2.dp, vertical = 4.dp)
+        )
     }
 }
 
@@ -3075,8 +3214,10 @@ fun ChatInputArea(
                         ) 
                     },
                     enabled = isEnabled && !isGenerating && !isLoading,
-                    maxLines = if (useModernChrome) 5 else 4,
-                    singleLine = useModernChrome,
+                    // Word-wrap and grow up to 4 lines, then scroll internally.
+                    // singleLine must stay false or maxLines is ignored.
+                    maxLines = 4,
+                    singleLine = false,
                     colors = if (useModernChrome) {
                         OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = Color.Transparent,

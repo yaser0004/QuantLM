@@ -34,6 +34,12 @@ object AppEventLogger {
     private const val LOG_FILE_NAME = "app_events.log"
     private const val ROTATED_LOG_FILE_NAME = "app_events.log.1"
 
+    // Per-session logs: each app launch appends its full log to its own
+    // timestamped file under diagnostics/sessions/. Bounded by keeping only the
+    // newest [MAX_SESSION_FILES] so internal storage can't fill without bound.
+    private const val SESSIONS_DIR_NAME = "sessions"
+    private const val MAX_SESSION_FILES = 20
+
     // Two-file rotation: when the live file passes this size it is renamed to
     // the .1 file (replacing the previous one) — an O(1) rename instead of the
     // old read-all-50k-lines-and-rewrite trim, which allocated ~12 MB on the
@@ -48,6 +54,24 @@ object AppEventLogger {
     @Volatile
     private var appContext: Context? = null
 
+    // Opt-out toggle (Settings). When false, the per-session file is not written;
+    // the rolling app_events.log (which feeds the diagnostics screen) is never
+    // gated by this. Set from DataStore by the Application after process start.
+    // Toggling it on mid-session lazily creates the session file so the change
+    // takes effect immediately rather than next launch.
+    @Volatile
+    var persistSessionLogs: Boolean = true
+        set(value) {
+            field = value
+            if (value && sessionFile == null) {
+                appContext?.let { setupSessionFile(it) }
+            }
+        }
+
+    // This launch's per-session log file, or null if it couldn't be set up.
+    @Volatile
+    private var sessionFile: File? = null
+
     private val fileLock = Any()
 
     // Each pending write carries its level so the drain loop can drop oldest
@@ -61,17 +85,68 @@ object AppEventLogger {
 
     fun init(context: Context) {
         appContext = context.applicationContext
+        // Session-file setup (mkdirs/listFiles/delete) runs on the writer
+        // coroutine's IO thread, not here on the main/cold-start path. The
+        // writer sets it up before its first batch write, so the opt-out (read
+        // by the Application before init) is still honored from the first line.
         ensureWriterStarted()
         info(
             component = "Application",
             action = "logger_initialized",
-            details = "logPath=${getLogFilePath() ?: "unknown"}, rotateAtBytes=$MAX_LOG_BYTES"
+            details = "logPath=${getLogFilePath() ?: "unknown"}, rotateAtBytes=$MAX_LOG_BYTES, " +
+                "sessionLogs=$persistSessionLogs"
         )
+    }
+
+    // Opens this launch's session file and prunes old ones. Idempotent and
+    // best-effort: a failure here must never stop the rolling diagnostics log.
+    private fun setupSessionFile(ctx: Context) {
+        synchronized(fileLock) {
+            if (sessionFile != null) return
+            try {
+                val dir = File(File(ctx.filesDir, LOG_DIR_NAME), SESSIONS_DIR_NAME)
+                dir.mkdirs()
+                pruneSessions(dir)
+                val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+                sessionFile = File(dir, "session_$stamp.log")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to set up session log file", e)
+                sessionFile = null
+            }
+        }
+    }
+
+    // Keep the newest (MAX_SESSION_FILES - 1) existing files so that, once this
+    // launch's new file is added, the total stays at MAX_SESSION_FILES.
+    private fun pruneSessions(dir: File) {
+        val files = dir.listFiles { f -> f.isFile && f.name.startsWith("session_") } ?: return
+        files.sortedByDescending { it.lastModified() }
+            .drop(MAX_SESSION_FILES - 1)
+            .forEach { runCatching { it.delete() } }
     }
 
     fun getLogFilePath(context: Context? = null): String? {
         val ctx = context?.applicationContext ?: appContext ?: return null
         return getLogFile(ctx).absolutePath
+    }
+
+    /** Per-session log files for this and prior launches, newest first. */
+    fun listSessionFiles(context: Context? = null): List<File> {
+        val ctx = context?.applicationContext ?: appContext ?: return emptyList()
+        val dir = File(File(ctx.filesDir, LOG_DIR_NAME), SESSIONS_DIR_NAME)
+        val files = dir.listFiles { f -> f.isFile && f.name.startsWith("session_") } ?: return emptyList()
+        return files.sortedByDescending { it.lastModified() }
+    }
+
+    /** The session file for the current launch, if one is open. */
+    fun currentSessionFile(): File? = sessionFile
+
+    fun readSessionFileLines(file: File): List<String> = synchronized(fileLock) {
+        try {
+            if (file.exists()) file.readLines() else emptyList()
+        } catch (e: Exception) {
+            listOf("Could not read session log ${file.name}: ${e.message ?: "unknown error"}")
+        }
     }
 
     fun readRecentLines(maxLines: Int = DEFAULT_READ_LINES, context: Context? = null): List<String> {
@@ -193,6 +268,14 @@ object AppEventLogger {
     }
 
     private suspend fun drainLoop() {
+        // Open the per-session file here (IO thread) before the first write, so
+        // the cold-start path never does this disk I/O on the main thread.
+        if (persistSessionLogs) {
+            appContext?.let { setupSessionFile(it) }
+            // Self-verifying: a single logcat line confirms the file was actually
+            // opened (not just that the flag was on), without needing run-as.
+            Log.i(TAG, "session_file_opened path=${sessionFile?.absolutePath ?: "FAILED"}")
+        }
         val batch = ArrayDeque<Pending>(WRITE_BATCH_MAX)
         while (writerScope.isActive) {
             // Block until at least one line is available.
@@ -246,6 +329,18 @@ object AppEventLogger {
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Failed writing app event log", e)
+            }
+            // Per-session copy (opt-out via [persistSessionLogs]). Best-effort and
+            // unbounded in size per session, but bounded in count by pruneSessions.
+            // Runs on the same async writer, so it never touches a caller hot path.
+            if (persistSessionLogs) {
+                sessionFile?.let { sf ->
+                    try {
+                        sf.appendText(payload)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed writing session log", e)
+                    }
+                }
             }
         }
     }

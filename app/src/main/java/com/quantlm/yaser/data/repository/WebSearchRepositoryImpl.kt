@@ -42,7 +42,10 @@ class WebSearchRepositoryImpl @Inject constructor() : WebSearchRepository {
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         // Per-page scraped text cap. Keeps the injected prompt small enough for
         // modest on-device context windows even with several sources.
-        private const val MAX_CONTENT_CHARS = 1200
+        private const val MAX_CONTENT_CHARS = 1600
+        // Max pages kept from any single domain. >1 so two strong articles from
+        // the same trusted site (e.g. two Reuters reports) aren't collapsed to one.
+        private const val MAX_PER_DOMAIN = 2
         // How many discovered results to consider before trust-ranking.
         private const val DISCOVERY_POOL = 12
         // Hard wall-clock budget for an entire search (discovery + all page
@@ -170,8 +173,24 @@ class WebSearchRepositoryImpl @Inject constructor() : WebSearchRepository {
                 )
                 if (results.size >= DISCOVERY_POOL) break
             }
-            // De-duplicate by domain so one site cannot dominate the answer.
-            results.distinctBy { it.domain }
+            // Keep at most MAX_PER_DOMAIN pages per domain so one site cannot
+            // dominate the answer, while still allowing two strong articles from
+            // the same trusted source through.
+            keepPerDomain(results, MAX_PER_DOMAIN)
+        }
+    }
+
+    /** Keeps at most [maxPerDomain] entries per [WebSource.domain], in order. */
+    internal fun keepPerDomain(sources: List<WebSource>, maxPerDomain: Int): List<WebSource> {
+        val perDomainCount = HashMap<String, Int>()
+        return sources.filter { source ->
+            val seen = perDomainCount.getOrDefault(source.domain, 0)
+            if (seen < maxPerDomain) {
+                perDomainCount[source.domain] = seen + 1
+                true
+            } else {
+                false
+            }
         }
     }
 

@@ -14,7 +14,7 @@ import com.quantlm.yaser.data.local.entity.MessageEntity
         ConversationEntity::class,
         MessageEntity::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = false
 )
 abstract class ChatDatabase : RoomDatabase() {
@@ -108,6 +108,16 @@ abstract class ChatDatabase : RoomDatabase() {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.execSQL("ALTER TABLE messages ADD COLUMN isModelChangeMarker INTEGER NOT NULL DEFAULT 0")
                 database.execSQL("ALTER TABLE messages ADD COLUMN markerModelName TEXT")
+            }
+        }
+
+        // Message versioning (ChatGPT-style regenerate). Fully additive —
+        // existing rows default to parentMessageId=NULL, isActiveVersion=1, so
+        // old conversations render unchanged and stay in context.
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE messages ADD COLUMN parentMessageId INTEGER")
+                database.execSQL("ALTER TABLE messages ADD COLUMN isActiveVersion INTEGER NOT NULL DEFAULT 1")
             }
         }
     }
