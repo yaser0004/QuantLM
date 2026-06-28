@@ -6,6 +6,7 @@
 !/README.md
 !/LICENSE
 !/.gitattributes
+!/PRIVACY-POLICY
 
 # Keep Gradle project files
 !/build.gradle.kts
